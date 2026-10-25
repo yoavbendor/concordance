@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Concordance: Torah</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1b1b1b; --bg:#fbfaf7; --muted:#6b6b6b; --accent:#2a5db0; --rule:#d9d6cf; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8e6e1; --bg:#16161a; --muted:#9a9a9a; --accent:#7aa7ff; --rule:#34343b; } }
+  body { margin:0; padding:16px; font:17px/1.7 "SBL Hebrew","Frank Ruehl CLM","David",serif; color:var(--fg); background:var(--bg); }
+  h1 { font-size:1.2rem; margin:0 0 12px; font-family:system-ui,sans-serif; }
+  input[type=search] { width:100%; box-sizing:border-box; font:inherit; padding:10px 12px; border:1px solid var(--rule); border-radius:8px; background:transparent; color:var(--fg); }
+  #status { color:var(--muted); font:14px system-ui,sans-serif; margin:8px 0; min-height:1.2em; }
+  .verse { border-top:1px solid var(--rule); padding:10px 0; }
+  .ref { font:14px system-ui,sans-serif; color:var(--accent); cursor:pointer; text-decoration:none; }
+  .he { margin:4px 0; }
+  .xrefs { font:14px system-ui,sans-serif; color:var(--muted); margin-top:6px; }
+  .xrefs button { all:unset; cursor:pointer; color:var(--accent); margin-inline-start:8px; }
+  mark { background:transparent; color:var(--accent); font-weight:700; }
+</style>
+</head>
+<body>
+<h1>Concordance: Torah</h1>
+<input id="q" type="search" placeholder="חפש מילה" autocomplete="off" aria-label="Search Hebrew word">
+<div id="status">טוען…</div>
+<div id="results"></div>
+<script>
+"use strict";
+const FINAL = { "ך":"כ", "ם":"מ", "ן":"נ", "ף":"פ", "ץ":"צ" };
+const MARKS = /[֑-ׇ]/g;
+
+// Same normalization as scripts/build_torah.py consonants().
+function consonants(word) {
+  return word.normalize("NFC").replace(MARKS, "").replace(/־/g, " ")
+    .replace(/[^א-ת]/g, "").replace(/[ךםןףץ]/g, c => FINAL[c]);
+}
+
+let data = null, words = null, xrefs = null, byId = null;
+
+async function load() {
+  const [t, w, x] = await Promise.all([
+    fetch("data/torah.json").then(r => r.json()),
+    fetch("data/words.json").then(r => r.json()),
+    fetch("data/xrefs.json").then(r => r.json()),
+  ]);
+  data = t; words = w; xrefs = x;
+  byId = new Map(data.verses.map((v, i) => [v.id, i]));
+  document.getElementById("status").textContent =
+    `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
+}
+
+// A verse (c,v) of a book lies in an edge's span when span start <= (c,v) <= span end.
+function inSpan(c, v, from, to) {
+  return (c > from[0] || (c === from[0] && v >= from[1])) &&
+         (c < to[0] || (c === to[0] && v <= to[1]));
+}
+
+function crossRefs(verse) {
+  const out = [];
+  for (const [f1, b1, t1, f2, b2, t2] of xrefs) {
+    if (b1 === verse.book && inSpan(verse.c, verse.v, f1, t1)) out.push([b2, f2, t2]);
+    else if (b2 === verse.book && inSpan(verse.c, verse.v, f2, t2)) out.push([b1, f1, t1]);
+  }
+  return out;
+}
+
+function fmtRef(book, from, to) {
+  const a = `${from[0]}:${from[1]}`;
+  if (from[0] === to[0] && from[1] === to[1]) return `${book} ${a}`;
+  return `${book} ${a}–${to[0] === from[0] ? to[1] : `${to[0]}:${to[1]}`}`;
+}
+
+function show(query) {
+  const key = consonants(query.trim());
+  if (!key) { document.getElementById("results").textContent = ""; return; }
+  const hits = (words[key] || []).slice(0, 200);
+  document.getElementById("status").textContent =
+    hits.length ? `${hits.length} מופעים (מוצגים עד 200)` : "לא נמצא";
+  render(hits, key);
+}
+
+// Jump to the verse a cross-reference starts at.
+function openRef(book, from) {
+  const i = byId.get(`${book} ${from[0]}:${from[1]}`);
+  if (i === undefined) return;
+  document.getElementById("q").value = "";
+  document.getElementById("status").textContent = "הפניה";
+  render([i], null);
+}
+
+function render(indices, key) {
+  const out = document.getElementById("results");
+  out.textContent = "";
+  for (const i of indices) {
+    const verse = data.verses[i];
+    const box = document.createElement("div");
+    box.className = "verse";
+    const ref = document.createElement("div");
+    ref.className = "ref";
+    ref.textContent = verse.id;
+    const he = document.createElement("div");
+    he.className = "he";
+    he.innerHTML = verse.he.split(" ").map(tok =>
+      key && consonants(tok) === key ? `<mark>${tok}</mark>` : tok).join(" ");
+    box.append(ref, he);
+    const refs = crossRefs(verse);
+    if (refs.length) {
+      const x = document.createElement("div");
+      x.className = "xrefs";
+      x.append(`הפניות (${refs.length}): `);
+      for (const [b, f, t] of refs.slice(0, 12)) {
+        const btn = document.createElement("button");
+        btn.textContent = fmtRef(b, f, t);
+        btn.onclick = () => openRef(b, f);
+        x.append(btn);
+      }
+      box.append(x);
+    }
+    out.append(box);
+  }
+}
+
+document.getElementById("q").addEventListener("input", e => show(e.target.value));
+load().catch(err => {
+  document.getElementById("status").textContent = "שגיאה בטעינת הנתונים: " + err;
+});
+</script>
+</body>
+</html>
