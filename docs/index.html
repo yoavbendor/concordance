@@ -13,6 +13,8 @@
   .modes { display:flex; gap:8px; margin:10px 0; font:15px system-ui,sans-serif; }
   .modes button { font:inherit; padding:6px 12px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--fg); cursor:pointer; }
   .modes button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .device { font:15px system-ui,sans-serif; margin:4px 0 8px; color:var(--muted); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .device input { width:18px; height:18px; }
   #status { color:var(--muted); font:14px system-ui,sans-serif; margin:8px 0; min-height:1.2em; }
   .verse { border-top:1px solid var(--rule); padding:10px 0; }
   .ref { font:14px system-ui,sans-serif; color:var(--accent); }
@@ -37,6 +39,7 @@
   <button id="mode-word" aria-pressed="true">מילה</button>
   <button id="mode-meaning" aria-pressed="false">משמעות</button>
 </div>
+<label class="device"><input id="use-gpu" type="checkbox"> GPU (WebGPU) למשמעות, כבוי = CPU</label>
 <div id="status">טוען…</div>
 <div id="results"></div>
 <div id="crashbanner"></div>
@@ -52,11 +55,15 @@
 <script type="module">
 "use strict";
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
-import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/ort.wasm.min.mjs";
 
 const MODEL = "onnx-community/embeddinggemma-2-ONNX";
 // Only the text model is loaded. The repo's vision and audio encoders (about 300 MB more)
 // are never used for search, and loading them crashed the page on iPhone.
+const ORT_VERSION = "1.31.0-dev.20260914-8d85527a0";
+const ORT_CPU = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/ort.wasm.min.mjs`;
+const ORT_GPU = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/ort.webgpu.min.mjs`;
+// The device choice is saved per browser and applied on reload, so only one runtime loads.
+const USE_GPU = (() => { try { return localStorage.getItem("concordance-gpu") === "1"; } catch (e) { return false; } })();
 const MODEL_BASE = "https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/main/onnx/";
 const DIM = 256;                        // Matryoshka truncation, as in scripts/embed_verses.py
 const DOCUMENT_PREFIX = "title: none | text: ";
@@ -185,31 +192,30 @@ async function loadData() {
   statusEl.textContent = `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
 }
 
-// Load the text model only, on first use. The WASM bundle: the WebGPU bundle's WASM path
-// has no kernel for this model's quantized gather, and its WebGPU path is not tested here.
-let tokenizer = null;
+// Load the text model only, on first use: the CPU (WASM) or GPU (WebGPU) runtime,
+// as chosen with the checkbox. There is no silent fallback, so a failure shows.
+let tokenizer = null, ort = null;
 async function loadModel() {
   if (extractor) return extractor;
   env.allowLocalModels = false;
   const t0 = performance.now();
-  log("STAGE", "loading text model", { model: "model_q4.onnx", webgpu: "gpu" in navigator });
+  const provider = USE_GPU ? "webgpu" : "wasm";
+  log("STAGE", "loading text model", { model: "model_q4.onnx", provider });
   if (!tokenizer) tokenizer = await AutoTokenizer.from_pretrained(MODEL);
-  log("STAGE", "tokenizer ready", { ms: Math.round(performance.now() - t0) });
-  const options = {
-    // The weights are one 174 MB file next to the graph; ORT fetches the data file itself.
-    externalData: [{ path: "model_q4.onnx_data", data: MODEL_BASE + "model_q4.onnx_data" }],
-  };
-  for (const ep of ["wasm"]) {
-    try {
-      extractor = await ort.InferenceSession.create(MODEL_BASE + "model_q4.onnx",
-        { ...options, executionProviders: [ep] });
-      log("STAGE", "text model ready", { provider: ep, ms: Math.round(performance.now() - t0) });
-      return extractor;
-    } catch (e) {
-      log("ERROR", `session on ${ep} failed`, e);
-    }
+  if (!ort) ort = await import(USE_GPU ? ORT_GPU : ORT_CPU);
+  log("STAGE", "tokenizer and runtime ready", { ms: Math.round(performance.now() - t0) });
+  try {
+    extractor = await ort.InferenceSession.create(MODEL_BASE + "model_q4.onnx", {
+      // The weights are one 174 MB file next to the graph; ORT fetches the data file itself.
+      externalData: [{ path: "model_q4.onnx_data", data: MODEL_BASE + "model_q4.onnx_data" }],
+      executionProviders: [provider],
+    });
+  } catch (e) {
+    log("ERROR", `text model failed on ${provider}`, e);
+    throw new Error(`the text model did not start on ${provider}; untick the GPU box to use the CPU`);
   }
-  throw new Error("the text model could not start");
+  log("STAGE", "text model ready", { provider, ms: Math.round(performance.now() - t0) });
+  return extractor;
 }
 
 // Query vector: prompt, mean-pooled sentence embedding, truncate to DIM, renormalize
@@ -350,6 +356,15 @@ input.addEventListener("keydown", e => {
       statusEl.textContent = "שגיאה: " + err.message;
     });
   }
+});
+
+// Device checkbox: saved, then the page reloads so the chosen runtime is the only one loaded.
+const gpuBox = document.getElementById("use-gpu");
+gpuBox.checked = USE_GPU;
+gpuBox.addEventListener("change", () => {
+  try { localStorage.setItem("concordance-gpu", gpuBox.checked ? "1" : "0"); } catch (e) { /* private mode */ }
+  log("STAGE", "device changed, reloading", { gpu: gpuBox.checked });
+  location.reload();
 });
 
 // Log panel buttons
