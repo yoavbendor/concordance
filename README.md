@@ -42,7 +42,8 @@ Reads the JSON above and writes three Lance datasets under `data/lance/`
 EmbeddingGemma 2 (`embeddinggemma-2` from Ollama's registry, GGUF) runs through
 llama.cpp's `llama-embedding`, which must be built from a version that knows the
 `gemma-embedding2` architecture. The 768-dimension vectors are truncated to 256
-(Matryoshka) and renormalized, and written to `verse_vectors.lance`.
+(Matryoshka) and renormalized, and written to `verse_vectors.lance`. Verses are embedded with the document prompt
+`title: none | text: `; queries need the query prompt `task: search result | query: `.
 
 Queries need `nprobes=128` and `refine_factor=10`. With the defaults, the IVF_PQ
 index missed Genesis 1:1 for "בראשית ברא אלהים"; with these settings it matches

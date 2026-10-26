@@ -27,11 +27,19 @@ OUT = ROOT / "data" / "lance"
 LLAMA_CPP_BIN = Path(os.environ.get("LLAMA_EMBEDDING", "/home/user/models/llama.cpp/build/bin/llama-embedding"))
 GGUF = Path(os.environ.get("EMBEDDINGGEMMA_GGUF", "/home/user/models/embeddinggemma-2/model.gguf"))
 DIM = 256
+# EmbeddingGemma prompts (from the model card and the cookbook): documents and queries differ.
+DOCUMENT_PREFIX = "title: none | text: "
+QUERY_PREFIX = "task: search result | query: "
 CHUNK = 2000
 SEP = "||"
 
 LETTERS_ONLY = re.compile(r"[^א-ת ]+")
 MARKS = re.compile(r"[֑-ׇ]")
+
+
+def query(text):
+    """Query text in the form the model was trained on."""
+    return QUERY_PREFIX + plain(text)
 
 
 def plain(he):
@@ -67,7 +75,7 @@ def truncate(vectors):
 def main():
     verses = json.loads((DATA / "tanakh.json").read_text(encoding="utf-8"))["verses"]
     ids = [v["id"] for v in verses]
-    texts = [plain(v["he"]) for v in verses]
+    texts = [DOCUMENT_PREFIX + plain(v["he"]) for v in verses]
     chunks = []
     for start in range(0, len(texts), CHUNK):
         chunk = embed(texts[start:start + CHUNK])
