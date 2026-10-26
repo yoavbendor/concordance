@@ -35,6 +35,19 @@ Reads the JSON above and writes three Lance datasets under `data/lance/`
 - `words.lance`: one row per search key, with `verse_ids` into `verses`; BTREE on `key`.
 - `xrefs.lance`: one row per cross-reference span pair; BTREE on `from_book`, `to_book`.
 
+## Embeddings
+
+    python3 scripts/embed_verses.py
+
+EmbeddingGemma 2 (`embeddinggemma-2` from Ollama's registry, GGUF) runs through
+llama.cpp's `llama-embedding`, which must be built from a version that knows the
+`gemma-embedding2` architecture. The 768-dimension vectors are truncated to 256
+(Matryoshka) and renormalized, and written to `verse_vectors.lance`.
+
+Queries need `nprobes=128` and `refine_factor=10`. With the defaults, the IVF_PQ
+index missed Genesis 1:1 for "בראשית ברא אלהים"; with these settings it matches
+exhaustive search on the checked queries.
+
 ## Run
 
 Serve `docs/` with any static server, for example:
