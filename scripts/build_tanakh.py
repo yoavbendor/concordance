@@ -5,6 +5,7 @@ and docs/data/xrefs.json (cross-reference span pairs between Tanakh passages).
 Standard library only. Source: https://github.com/Sefaria/Sefaria-Export
 """
 import csv
+import html
 import io
 import json
 import re
@@ -32,14 +33,16 @@ def get(url):
 def consonants(word):
     """Search key: no points or marks, final letters folded to base form."""
     word = unicodedata.normalize("NFC", word)
-    word = NIKUD_AND_MARKS.sub("", word).replace("־", " ")
+    word = NIKUD_AND_MARKS.sub("", word)
     return re.sub(r"[^א-ת]", "", word).translate(FINAL_TO_BASE)
 
 
 def flatten(verse):
     if isinstance(verse, list):
         return " ".join(flatten(v) for v in verse)
-    return TAGS.sub("", verse).strip()
+    # Tags and entities such as &thinsp; mark breaks between words, so they become spaces.
+    text = html.unescape(TAGS.sub(" ", verse)).replace("\u05BE", " ")  # maqaf joins words
+    return " ".join(text.split())
 
 
 def load_tanakh_books():
