@@ -37,7 +37,7 @@
 <input id="q" type="search" placeholder="חפש מילה או משפט" autocomplete="off" aria-label="Search Hebrew">
 <div class="modes">
   <button id="mode-word" aria-pressed="true">מילה</button>
-  <button id="mode-meaning" aria-pressed="false">משמעות</button>
+  <button id="mode-meaning" aria-pressed="false">משמעות (ניסיוני)</button>
 </div>
 <label class="device"><input id="use-gpu" type="checkbox"> GPU (WebGPU) למשמעות, כבוי = CPU</label>
 <div id="status">טוען…</div>
@@ -338,7 +338,7 @@ function render(hits, key) {
     const he = document.createElement("div");
     he.className = "he";
     he.innerHTML = verse.he.split(" ").map(tok =>
-      key && consonants(tok) === key ? `<mark>${tok}</mark>` : tok).join(" ");
+      key && (key instanceof Set ? key.has(consonants(tok)) : consonants(tok) === key) ? `<mark>${tok}</mark>` : tok).join(" ");
     box.append(ref, he);
     const refs = crossRefs(verse);
     if (refs.length) {
@@ -357,13 +357,56 @@ function render(hits, key) {
   }
 }
 
-function showWord(query) {
+// Canonical order of the Tanakh, so results read Genesis first. The data's book list is alphabetical.
+const CANON = ["Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua", "Judges",
+  "I Samuel", "II Samuel", "I Kings", "II Kings", "Isaiah", "Jeremiah", "Ezekiel", "Hosea", "Joel",
+  "Amos", "Obadiah", "Jonah", "Micah", "Nahum", "Habakkuk", "Zephaniah", "Haggai", "Zechariah",
+  "Malachi", "Psalms", "Proverbs", "Job", "Song of Songs", "Ruth", "Lamentations", "Ecclesiastes",
+  "Esther", "Daniel", "Ezra", "Nehemiah", "I Chronicles", "II Chronicles"];
+const CANON_INDEX = new Map(CANON.map((b, i) => [b, i]));
+function canonicalKey(i) {
+  const v = data.verses[i];
+  return [CANON_INDEX.get(v.book) ?? 99, v.c, v.v];
+}
+function inCanonicalOrder(indices) {
+  return indices.sort((x, y) => {
+    const a = canonicalKey(x), b = canonicalKey(y);
+    return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+  });
+}
+
+// Hebrew one-letter prefixes (and, the, in, to, like, from, that...) that often attach to a word.
+const PREFIXES = ["ו", "ה", "ב", "ל", "כ", "מ", "ש"];
+
+// Exact word forms first; when they are few, also the forms with a prefix removed,
+// so that וַיֹּאמֶר or לָאָרֶץ still find אמר and ארץ. Duplicates are dropped.
+function wordHits(query) {
   const key = consonants(query.trim());
+  if (!key) return { key, keys: [], hits: [] };
+  const keys = [key];
+  const exact = words[key] || [];
+  if (exact.length < 5) {
+    for (const p of PREFIXES) if (key.startsWith(p) && key.length > 2 && words[key.slice(1)]) keys.push(key.slice(1));
+  }
+  // Still nothing: the Tanakh often spells a word without a vav (אלהים for אלוהים).
+  if (!keys.some(k => words[k])) {
+    for (let j = 1; j < key.length - 1; j++) {
+      if (key[j] === "ו" && words[key.slice(0, j) + key.slice(j + 1)]) keys.push(key.slice(0, j) + key.slice(j + 1));
+    }
+  }
+  const seen = new Set(), hits = [];
+  for (const k of keys) for (const i of words[k] || []) {
+    if (!seen.has(i)) { seen.add(i); hits.push(i); }
+  }
+  return { key, keys, hits: inCanonicalOrder(hits).slice(0, 200).map(i => [i]) };
+}
+
+function showWord(query) {
+  const { key, keys, hits } = wordHits(query);
   if (!key) { resultsEl.textContent = ""; return; }
-  const hits = (words[key] || []).slice(0, 200).map(i => [i]);
-  log("INFO", "word search", { query, key, hits: hits.length });
+  log("INFO", "word search", { query, keys, hits: hits.length });
   statusEl.textContent = hits.length ? `${hits.length} מופעים (מוצגים עד 200)` : "לא נמצא";
-  render(hits, key);
+  render(hits, new Set(keys));
 }
 
 async function showMeaning(query) {
