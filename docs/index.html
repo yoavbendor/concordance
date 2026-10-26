@@ -448,15 +448,14 @@ function similarButton(i) {
 }
 
 function similarTo(i) {
-  const text = english[data.verses[i].id];
-  if (!text) return;
+  if (!vectors) { statusEl.textContent = "Meaning search is not available yet"; return; }
+  // The verse's own English vector is already computed: rank the others against it, no model.
+  const q = vectors.slice(i * DIM, (i + 1) * DIM);
+  const hits = topK(q, 10);
+  lastQuery = "";                       // a pending typed search must not replace these results
   log("INFO", "similar to verse", { verse: data.verses[i].id });
-  setMode("meaning");
-  input.value = text;
-  showMeaning(text).catch(err => {
-    log("ERROR", "similar search failed", err);
-    statusEl.textContent = "Error: " + err.message;
-  });
+  statusEl.textContent = `Verses similar to ${heRef(data.verses[i].book, data.verses[i].c, data.verses[i].v)}`;
+  render(hits, null);
 }
 
 // ---- Chapter reader ----------------------------------------------------------
