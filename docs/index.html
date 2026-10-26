@@ -194,8 +194,56 @@ async function loadData() {
 
 // Load the text model only, on first use: the CPU (WASM) or GPU (WebGPU) runtime,
 // as chosen with the checkbox. There is no silent fallback, so a failure shows.
-let tokenizer = null, ort = null;
-async function loadModel() {
+// The weights are kept in the browser's cache storage, so a later visit does not download
+// them again. One load runs at a time; a second search waits for the first.
+const WEIGHTS_URL = MODEL_BASE + "model_q4.onnx_data";
+const WEIGHTS_CACHE = "concordance-model-v1";
+let tokenizer = null, ort = null, loading = null;
+
+// Weights as a blob: from the cache when present, else downloaded with progress and stored.
+async function weightsBlob() {
+  let cache = null;
+  try { cache = await caches.open(WEIGHTS_CACHE); } catch (e) { log("WARN", "no cache storage", e); }
+  const hit = cache ? await cache.match(WEIGHTS_URL) : null;
+  if (hit) {
+    const blob = await hit.blob();
+    log("INFO", "weights from cache", { mb: Math.round(blob.size / 1e6) });
+    return blob;
+  }
+  const res = await fetch(WEIGHTS_URL);
+  if (!res.ok) throw new Error(`weights download failed: HTTP ${res.status}`);
+  const total = Number(res.headers.get("content-length")) || 174028800;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let got = 0, lastStep = -1;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    const step = Math.floor((got / total) * 10);
+    if (step !== lastStep) {
+      lastStep = step;
+      statusEl.textContent = `טוען מודל… ${step * 10}% (אל תסגור את הדף)`;
+      log("INFO", "weights download", { percent: step * 10, mb: Math.round(got / 1e6) });
+    }
+  }
+  const blob = new Blob(chunks, { type: "application/octet-stream" });
+  if (cache) {
+    try { await cache.put(WEIGHTS_URL, new Response(blob)); log("INFO", "weights cached"); }
+    catch (e) { log("WARN", "cache write failed", e); }
+  }
+  return blob;
+}
+
+function loadModel() {
+  if (!loading) {
+    loading = doLoadModel().catch(e => { loading = null; throw e; });
+  }
+  return loading;
+}
+
+async function doLoadModel() {
   if (extractor) return extractor;
   env.allowLocalModels = false;
   const t0 = performance.now();
@@ -203,16 +251,20 @@ async function loadModel() {
   log("STAGE", "loading text model", { model: "model_q4.onnx", provider });
   if (!tokenizer) tokenizer = await AutoTokenizer.from_pretrained(MODEL);
   if (!ort) ort = await import(USE_GPU ? ORT_GPU : ORT_CPU);
-  log("STAGE", "tokenizer and runtime ready", { ms: Math.round(performance.now() - t0) });
+  const blob = await weightsBlob();
+  const weightsUrl = URL.createObjectURL(blob);
+  log("STAGE", "runtime and weights ready", { provider, ms: Math.round(performance.now() - t0) });
+  statusEl.textContent = "טוען את המודל לזיכרון…";
   try {
     extractor = await ort.InferenceSession.create(MODEL_BASE + "model_q4.onnx", {
-      // The weights are one 174 MB file next to the graph; ORT fetches the data file itself.
-      externalData: [{ path: "model_q4.onnx_data", data: MODEL_BASE + "model_q4.onnx_data" }],
+      externalData: [{ path: "model_q4.onnx_data", data: weightsUrl }],
       executionProviders: [provider],
     });
   } catch (e) {
     log("ERROR", `text model failed on ${provider}`, e);
     throw new Error(`the text model did not start on ${provider}; untick the GPU box to use the CPU`);
+  } finally {
+    URL.revokeObjectURL(weightsUrl);
   }
   log("STAGE", "text model ready", { provider, ms: Math.round(performance.now() - t0) });
   return extractor;
