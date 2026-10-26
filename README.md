@@ -23,6 +23,18 @@ This writes three files into `docs/data/`:
 
 Standard library only. The build downloads the export; nothing is cached.
 
+## Lance
+
+    pip install pylance pyarrow
+    python3 scripts/write_lance.py
+
+Reads the JSON above and writes three Lance datasets under `data/lance/`
+(not committed; rebuild locally):
+
+- `verses.lance`: one row per verse, with BTREE indexes on `book`, `c`, `v`.
+- `words.lance`: one row per search key, with `verse_ids` into `verses`; BTREE on `key`.
+- `xrefs.lance`: one row per cross-reference span pair; BTREE on `from_book`, `to_book`.
+
 ## Run
 
 Serve `docs/` with any static server, for example:
