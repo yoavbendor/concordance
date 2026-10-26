@@ -52,7 +52,7 @@
 <script type="module">
 "use strict";
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
-import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.mjs";
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/ort.wasm.min.mjs";
 
 const MODEL = "onnx-community/embeddinggemma-2-ONNX";
 // Only the text model is loaded. The repo's vision and audio encoders (about 300 MB more)
@@ -185,7 +185,8 @@ async function loadData() {
   statusEl.textContent = `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
 }
 
-// Load the text model only, on first use. WebGPU when the browser has it, WASM otherwise.
+// Load the text model only, on first use. The WASM bundle: the WebGPU bundle's WASM path
+// has no kernel for this model's quantized gather, and its WebGPU path is not tested here.
 let tokenizer = null;
 async function loadModel() {
   if (extractor) return extractor;
@@ -198,7 +199,7 @@ async function loadModel() {
     // The weights are one 174 MB file next to the graph; ORT fetches the data file itself.
     externalData: [{ path: "model_q4.onnx_data", data: MODEL_BASE + "model_q4.onnx_data" }],
   };
-  for (const ep of ["webgpu", "wasm"]) {
+  for (const ep of ["wasm"]) {
     try {
       extractor = await ort.InferenceSession.create(MODEL_BASE + "model_q4.onnx",
         { ...options, executionProviders: [ep] });
@@ -208,7 +209,7 @@ async function loadModel() {
       log("ERROR", `session on ${ep} failed`, e);
     }
   }
-  throw new Error("the text model could not start on WebGPU or WASM");
+  throw new Error("the text model could not start");
 }
 
 // Query vector: prompt, mean-pooled sentence embedding, truncate to DIM, renormalize
