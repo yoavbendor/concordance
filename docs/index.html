@@ -5,14 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Concordance: Tanakh</title>
 <style>
-  :root { color-scheme: light dark; --fg:#1b1b1b; --bg:#fbfaf7; --muted:#6b6b6b; --accent:#2a5db0; --rule:#d9d6cf; }
-  @media (prefers-color-scheme: dark) { :root { --fg:#e8e6e1; --bg:#16161a; --muted:#9a9a9a; --accent:#7aa7ff; --rule:#34343b; } }
+  :root { color-scheme: light dark; --fg:#1b1b1b; --bg:#fbfaf7; --muted:#6b6b6b; --accent:#2a5db0; --rule:#d9d6cf; --chip:#ece9e2; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8e6e1; --bg:#16161a; --muted:#9a9a9a; --accent:#7aa7ff; --rule:#34343b; --chip:#26262c; } }
   body { margin:0; padding:16px; font:17px/1.7 "SBL Hebrew","Frank Ruehl CLM","David",serif; color:var(--fg); background:var(--bg); }
   h1 { font-size:1.2rem; margin:0 0 12px; font-family:system-ui,sans-serif; }
   input[type=search] { width:100%; box-sizing:border-box; font:inherit; padding:10px 12px; border:1px solid var(--rule); border-radius:8px; background:transparent; color:var(--fg); }
+  .modes { display:flex; gap:8px; margin:10px 0; font:15px system-ui,sans-serif; }
+  .modes button { font:inherit; padding:6px 12px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--fg); cursor:pointer; }
+  .modes button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); font-weight:600; }
   #status { color:var(--muted); font:14px system-ui,sans-serif; margin:8px 0; min-height:1.2em; }
   .verse { border-top:1px solid var(--rule); padding:10px 0; }
-  .ref { font:14px system-ui,sans-serif; color:var(--accent); cursor:pointer; text-decoration:none; }
+  .ref { font:14px system-ui,sans-serif; color:var(--accent); }
+  .score { font:13px system-ui,sans-serif; color:var(--muted); margin-inline-start:8px; }
   .he { margin:4px 0; }
   .xrefs { font:14px system-ui,sans-serif; color:var(--muted); margin-top:6px; }
   .xrefs button { all:unset; cursor:pointer; color:var(--accent); margin-inline-start:8px; }
@@ -21,35 +25,100 @@
 </head>
 <body>
 <h1>Concordance: Tanakh</h1>
-<input id="q" type="search" placeholder="חפש מילה" autocomplete="off" aria-label="Search Hebrew word">
+<input id="q" type="search" placeholder="חפש מילה או משפט" autocomplete="off" aria-label="Search Hebrew">
+<div class="modes">
+  <button id="mode-word" aria-pressed="true">מילה</button>
+  <button id="mode-meaning" aria-pressed="false">משמעות</button>
+</div>
 <div id="status">טוען…</div>
 <div id="results"></div>
-<script>
+<script type="module">
 "use strict";
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
+
+const MODEL = "onnx-community/embeddinggemma-2-ONNX";
+const DIM = 256;                        // Matryoshka truncation, as in scripts/embed_verses.py
+const DOCUMENT_PREFIX = "title: none | text: ";
+const QUERY_PREFIX = "task: search result | query: ";
 const FINAL = { "ך":"כ", "ם":"מ", "ן":"נ", "ף":"פ", "ץ":"צ" };
 const MARKS = /[֑-ׇ]/g;
+const LETTERS = /[^א-ת ]+/g;
 
-// Same normalization as scripts/build_torah.py consonants().
+// Same normalization as scripts/build_tanakh.py consonants() (word search).
 function consonants(word) {
-  return word.normalize("NFC").replace(MARKS, "").replace(/־/g, " ")
+  return word.normalize("NFC").replace(MARKS, "")
     .replace(/[^א-ת]/g, "").replace(/[ךםןףץ]/g, c => FINAL[c]);
 }
+// Same as scripts/embed_verses.py plain() (meaning search).
+function plain(he) {
+  return he.replace(MARKS, "").replace(LETTERS, " ").split(/\s+/).filter(Boolean).join(" ");
+}
 
-let data = null, words = null, xrefs = null, byId = null;
+let data = null, words = null, xrefs = null, byId = null, vectors = null;
+let extractor = null, mode = "word", lastQuery = "";
+const statusEl = document.getElementById("status");
+const resultsEl = document.getElementById("results");
+const input = document.getElementById("q");
 
-async function load() {
-  const [t, w, x] = await Promise.all([
+// float16 bit pattern -> number
+function halfToFloat(h) {
+  const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+  if (e === 0) return s * 2 ** -14 * (f / 1024);
+  if (e === 31) return f ? NaN : s * Infinity;
+  return s * 2 ** (e - 15) * (1 + f / 1024);
+}
+
+async function loadData() {
+  const [t, w, x, vbuf] = await Promise.all([
     fetch("data/tanakh.json").then(r => r.json()),
     fetch("data/words.json").then(r => r.json()),
     fetch("data/xrefs.json").then(r => r.json()),
+    fetch("data/verse_vectors.f16").then(r => r.arrayBuffer()),
   ]);
   data = t; words = w; xrefs = x;
   byId = new Map(data.verses.map((v, i) => [v.id, i]));
-  document.getElementById("status").textContent =
-    `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
+  const half = new Uint16Array(vbuf);
+  vectors = new Float32Array(half.length);
+  for (let i = 0; i < half.length; i++) vectors[i] = halfToFloat(half[i]);
+  statusEl.textContent = `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
 }
 
-// A verse (c,v) of a book lies in an edge's span when span start <= (c,v) <= span end.
+// Load the query model on first use; WebGPU when the browser has it, WASM otherwise.
+async function loadModel() {
+  if (extractor) return extractor;
+  env.allowLocalModels = false;
+  const progress = p => {
+    if (p.status === "progress" && p.total) statusEl.textContent = `טוען מודל… ${Math.round(p.progress)}%`;
+  };
+  const opts = { dtype: "q4", progress_callback: progress };
+  try {
+    extractor = await pipeline("feature-extraction", MODEL, { ...opts, device: "webgpu" });
+  } catch (e) {
+    extractor = await pipeline("feature-extraction", MODEL, { ...opts, device: "wasm" });
+  }
+  return extractor;
+}
+
+// Query vector: prompt, mean pooling, truncate to DIM, renormalize (matches embed_verses.py).
+async function embedQuery(text) {
+  const model = await loadModel();
+  const out = await model(QUERY_PREFIX + plain(text), { pooling: "mean", normalize: true });
+  const v = Float32Array.from(out.data.slice(0, DIM));
+  const n = Math.hypot(...v);
+  return v.map(x => x / n);
+}
+
+function topK(q, k) {
+  const n = data.verses.length, scores = new Float32Array(n);
+  for (let i = 0, off = 0; i < n; i++, off += DIM) {
+    let s = 0;
+    for (let j = 0; j < DIM; j++) s += q[j] * vectors[off + j];
+    scores[i] = s;
+  }
+  return Array.from(scores.keys()).sort((a, b) => scores[b] - scores[a]).slice(0, k)
+    .map(i => [i, scores[i]]);
+}
+
 function inSpan(c, v, from, to) {
   return (c > from[0] || (c === from[0] && v >= from[1])) &&
          (c < to[0] || (c === to[0] && v <= to[1]));
@@ -70,34 +139,21 @@ function fmtRef(book, from, to) {
   return `${book} ${a}–${to[0] === from[0] ? to[1] : `${to[0]}:${to[1]}`}`;
 }
 
-function show(query) {
-  const key = consonants(query.trim());
-  if (!key) { document.getElementById("results").textContent = ""; return; }
-  const hits = (words[key] || []).slice(0, 200);
-  document.getElementById("status").textContent =
-    hits.length ? `${hits.length} מופעים (מוצגים עד 200)` : "לא נמצא";
-  render(hits, key);
-}
-
-// Jump to the verse a cross-reference starts at.
-function openRef(book, from) {
-  const i = byId.get(`${book} ${from[0]}:${from[1]}`);
-  if (i === undefined) return;
-  document.getElementById("q").value = "";
-  document.getElementById("status").textContent = "הפניה";
-  render([i], null);
-}
-
-function render(indices, key) {
-  const out = document.getElementById("results");
-  out.textContent = "";
-  for (const i of indices) {
+function render(hits, key) {
+  resultsEl.textContent = "";
+  for (const [i, score] of hits) {
     const verse = data.verses[i];
     const box = document.createElement("div");
     box.className = "verse";
     const ref = document.createElement("div");
     ref.className = "ref";
     ref.textContent = verse.id;
+    if (score !== undefined) {
+      const s = document.createElement("span");
+      s.className = "score";
+      s.textContent = score.toFixed(3);
+      ref.append(s);
+    }
     const he = document.createElement("div");
     he.className = "he";
     he.innerHTML = verse.he.split(" ").map(tok =>
@@ -116,13 +172,57 @@ function render(indices, key) {
       }
       box.append(x);
     }
-    out.append(box);
+    resultsEl.append(box);
   }
 }
 
-document.getElementById("q").addEventListener("input", e => show(e.target.value));
-load().catch(err => {
-  document.getElementById("status").textContent = "שגיאה בטעינת הנתונים: " + err;
+function showWord(query) {
+  const key = consonants(query.trim());
+  if (!key) { resultsEl.textContent = ""; return; }
+  const hits = (words[key] || []).slice(0, 200).map(i => [i]);
+  statusEl.textContent = hits.length ? `${hits.length} מופעים (מוצגים עד 200)` : "לא נמצא";
+  render(hits, key);
+}
+
+async function showMeaning(query) {
+  const text = query.trim();
+  if (!text) { resultsEl.textContent = ""; return; }
+  lastQuery = text;
+  const wasLoading = !extractor;
+  if (wasLoading) statusEl.textContent = "טוען מודל…";
+  const q = await embedQuery(text);
+  if (lastQuery !== text) return;   // a newer query has replaced this one
+  statusEl.textContent = "10 התאמות הקרובות ביותר";
+  render(topK(q, 10), null);
+}
+
+function openRef(book, from) {
+  const i = byId.get(`${book} ${from[0]}:${from[1]}`);
+  if (i === undefined) return;
+  input.value = "";
+  statusEl.textContent = "הפניה";
+  render([[i]], null);
+}
+
+function setMode(next) {
+  mode = next;
+  document.getElementById("mode-word").setAttribute("aria-pressed", String(next === "word"));
+  document.getElementById("mode-meaning").setAttribute("aria-pressed", String(next === "meaning"));
+  resultsEl.textContent = "";
+  statusEl.textContent = next === "meaning" ? "הקלד משפט ולחץ Enter" : `${data.verses.length} פסוקים`;
+}
+
+document.getElementById("mode-word").onclick = () => setMode("word");
+document.getElementById("mode-meaning").onclick = () => setMode("meaning");
+input.addEventListener("input", e => { if (mode === "word") showWord(e.target.value); });
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && mode === "meaning") {
+    showMeaning(e.target.value).catch(err => { statusEl.textContent = "שגיאה: " + err.message; });
+  }
+});
+
+loadData().then(() => setMode("word")).catch(err => {
+  statusEl.textContent = "שגיאה בטעינת הנתונים: " + err;
 });
 </script>
 </body>
