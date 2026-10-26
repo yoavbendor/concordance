@@ -21,6 +21,13 @@
   .xrefs { font:14px system-ui,sans-serif; color:var(--muted); margin-top:6px; }
   .xrefs button { all:unset; cursor:pointer; color:var(--accent); margin-inline-start:8px; }
   mark { background:transparent; color:var(--accent); font-weight:700; }
+  #logpanel { margin-top:24px; border-top:2px solid var(--rule); padding-top:8px; font:14px system-ui,sans-serif; }
+  #logpanel summary { cursor:pointer; color:var(--accent); font-weight:600; }
+  #logpanel .row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  #logpanel button { font:14px system-ui,sans-serif; padding:6px 10px; border-radius:8px; border:1px solid var(--rule); background:var(--chip); color:var(--fg); }
+  #logbox { direction:ltr; text-align:left; white-space:pre-wrap; word-break:break-all; font:12px/1.4 ui-monospace,Menlo,monospace; max-height:50vh; overflow:auto; background:var(--chip); padding:8px; border-radius:8px; margin:0; }
+  #crashbanner { display:none; background:#fff3cd; color:#664d03; padding:8px 10px; border-radius:8px; margin:8px 0; font:14px system-ui,sans-serif; }
+  @media (prefers-color-scheme: dark) { #crashbanner { background:#3a3112; color:#ffe69c; } }
 </style>
 </head>
 <body>
@@ -32,6 +39,16 @@
 </div>
 <div id="status">טוען…</div>
 <div id="results"></div>
+<div id="crashbanner"></div>
+<details id="logpanel">
+  <summary>Log (survives crashes)</summary>
+  <div class="row">
+    <button id="log-copy">Copy log</button>
+    <button id="log-prev">Show last session's log</button>
+    <button id="log-clear">Clear log</button>
+  </div>
+  <pre id="logbox"></pre>
+</details>
 <script type="module">
 "use strict";
 import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
@@ -54,6 +71,84 @@ function plain(he) {
   return he.replace(MARKS, "").replace(LETTERS, " ").split(/\s+/).filter(Boolean).join(" ");
 }
 
+// ---- Persistent log -------------------------------------------------------
+// Every line is written to localStorage as it happens, so it survives a tab crash or a
+// reload. A run that never reached pagehide is marked as having crashed on the next load.
+const LOG_KEY = "concordance-log", PREV_KEY = "concordance-log-prev", RUN_KEY = "concordance-running";
+const LOG_MAX = 300000;          // characters kept per session
+const lines = [];
+let logSize = 0, persistTimer = null, prevLog = "", prevCrashed = false;
+
+function store(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* quota or private mode */ } }
+function fetchStore(key) { try { return localStorage.getItem(key) || ""; } catch (e) { return ""; } }
+
+function describe(x) {
+  if (x === undefined) return "";
+  if (x instanceof Error) return `${x.name}: ${x.message}\n${x.stack || ""}`;
+  if (typeof x === "string") return x;
+  try { return JSON.stringify(x); } catch (e) { return String(x); }
+}
+
+function persistNow() {
+  persistTimer = null;
+  store(LOG_KEY, lines.join("\n"));
+}
+
+function log(level, msg, detail) {
+  const text = `${new Date().toISOString()} ${level} ${msg}${detail !== undefined ? " " + describe(detail) : ""}`;
+  lines.push(text);
+  logSize += text.length + 1;
+  while (logSize > LOG_MAX && lines.length > 1) logSize -= lines.shift().length + 1;
+  // Errors and stage markers are written at once; the rest are batched to keep the page fast.
+  if (level === "ERROR" || level === "STAGE") { if (persistTimer) clearTimeout(persistTimer); persistNow(); }
+  else if (!persistTimer) persistTimer = setTimeout(persistNow, 400);
+  if (document.getElementById("logpanel")?.open) renderLog();
+}
+
+function renderLog() {
+  document.getElementById("logbox").textContent = lines.join("\n");
+}
+
+// Mirror console warnings and errors into the log, keeping the console output too.
+for (const level of ["warn", "error"]) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    log(level === "error" ? "ERROR" : "WARN", "console." + level, args.map(describe).join(" | "));
+    original(...args);
+  };
+}
+window.addEventListener("error", e => {
+  log("ERROR", `uncaught: ${e.message} at ${e.filename}:${e.lineno}:${e.colno}`, e.error || undefined);
+});
+window.addEventListener("unhandledrejection", e => {
+  log("ERROR", "unhandled promise rejection", e.reason);
+});
+
+// Mark a crash: the flag is still set from the last run, and pagehide never cleared it.
+prevLog = fetchStore(LOG_KEY);
+prevCrashed = fetchStore(RUN_KEY) === "1";
+store(PREV_KEY, prevLog);
+store(RUN_KEY, "1");
+window.addEventListener("pagehide", () => { log("INFO", "page hidden or closed"); persistNow(); store(RUN_KEY, "0"); });
+setInterval(() => {
+  const m = performance.memory ? ` heap=${Math.round(performance.memory.usedJSHeapSize / 1e6)}MB` : "";
+  log("HEART", `alive${m} visible=${document.visibilityState}`);
+}, 10000);
+
+log("STAGE", "page start", {
+  url: location.href, ua: navigator.userAgent, platform: navigator.platform,
+  cores: navigator.hardwareConcurrency, memoryGB: navigator.deviceMemory,
+  screen: `${screen.width}x${screen.height}@${devicePixelRatio}`,
+  webgpu: "gpu" in navigator, online: navigator.onLine,
+});
+if (prevCrashed) {
+  log("STAGE", "previous session did not close cleanly (crash, reload or kill); its log is kept");
+  const banner = document.getElementById("crashbanner");
+  banner.style.display = "block";
+  document.getElementById("logpanel").open = true;   // open the log so it can be copied at once
+  banner.textContent = "The last session ended without closing cleanly. Its log is kept: press \"Show last session's log\" under Log and copy it.";
+}
+
 let data = null, words = null, xrefs = null, byId = null, vectors = null;
 let extractor = null, mode = "word", lastQuery = "";
 const statusEl = document.getElementById("status");
@@ -69,6 +164,8 @@ function halfToFloat(h) {
 }
 
 async function loadData() {
+  const t0 = performance.now();
+  log("STAGE", "loading data files");
   const [t, w, x, vbuf] = await Promise.all([
     fetch("data/tanakh.json").then(r => r.json()),
     fetch("data/words.json").then(r => r.json()),
@@ -80,6 +177,7 @@ async function loadData() {
   const half = new Uint16Array(vbuf);
   vectors = new Float32Array(half.length);
   for (let i = 0; i < half.length; i++) vectors[i] = halfToFloat(half[i]);
+  log("STAGE", "data ready", { verses: data.verses.length, xrefs: xrefs.length, vectorBytes: vbuf.byteLength, ms: Math.round(performance.now() - t0) });
   statusEl.textContent = `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
 }
 
@@ -87,14 +185,26 @@ async function loadData() {
 async function loadModel() {
   if (extractor) return extractor;
   env.allowLocalModels = false;
+  const t0 = performance.now();
+  let lastStep = -1;
   const progress = p => {
-    if (p.status === "progress" && p.total) statusEl.textContent = `טוען מודל… ${Math.round(p.progress)}%`;
+    if (p.status === "progress" && p.total) {
+      statusEl.textContent = `טוען מודל… ${Math.round(p.progress)}%`;
+      const step = Math.floor(p.progress / 10);    // log every 10%, not every chunk
+      if (step !== lastStep) { lastStep = step; log("INFO", "model download", { file: p.file, percent: Math.round(p.progress) }); }
+    } else if (p.status !== "progress") {
+      log("INFO", "model " + p.status, p.file || "");
+    }
   };
   const opts = { dtype: "q4", progress_callback: progress };
+  log("STAGE", "loading model", { model: MODEL, dtype: "q4", webgpu: "gpu" in navigator });
   try {
     extractor = await pipeline("feature-extraction", MODEL, { ...opts, device: "webgpu" });
+    log("STAGE", "model ready on webgpu", { ms: Math.round(performance.now() - t0) });
   } catch (e) {
+    log("ERROR", "webgpu failed, falling back to wasm", e);
     extractor = await pipeline("feature-extraction", MODEL, { ...opts, device: "wasm" });
+    log("STAGE", "model ready on wasm", { ms: Math.round(performance.now() - t0) });
   }
   return extractor;
 }
@@ -102,9 +212,11 @@ async function loadModel() {
 // Query vector: prompt, mean pooling, truncate to DIM, renormalize (matches embed_verses.py).
 async function embedQuery(text) {
   const model = await loadModel();
+  const t0 = performance.now();
   const out = await model(QUERY_PREFIX + plain(text), { pooling: "mean", normalize: true });
   const v = Float32Array.from(out.data.slice(0, DIM));
   const n = Math.hypot(...v);
+  log("INFO", "query embedded", { chars: text.length, ms: Math.round(performance.now() - t0) });
   return v.map(x => x / n);
 }
 
@@ -180,6 +292,7 @@ function showWord(query) {
   const key = consonants(query.trim());
   if (!key) { resultsEl.textContent = ""; return; }
   const hits = (words[key] || []).slice(0, 200).map(i => [i]);
+  log("INFO", "word search", { query, key, hits: hits.length });
   statusEl.textContent = hits.length ? `${hits.length} מופעים (מוצגים עד 200)` : "לא נמצא";
   render(hits, key);
 }
@@ -188,12 +301,15 @@ async function showMeaning(query) {
   const text = query.trim();
   if (!text) { resultsEl.textContent = ""; return; }
   lastQuery = text;
-  const wasLoading = !extractor;
-  if (wasLoading) statusEl.textContent = "טוען מודל…";
+  log("INFO", "meaning search", { query: text });
+  if (!extractor) statusEl.textContent = "טוען מודל…";
   const q = await embedQuery(text);
   if (lastQuery !== text) return;   // a newer query has replaced this one
+  const t0 = performance.now();
+  const hits = topK(q, 10);
+  log("INFO", "ranked", { ms: Math.round(performance.now() - t0), top: hits.slice(0, 3).map(([i, s]) => data.verses[i].id + " " + s.toFixed(3)) });
   statusEl.textContent = "10 התאמות הקרובות ביותר";
-  render(topK(q, 10), null);
+  render(hits, null);
 }
 
 function openRef(book, from) {
@@ -205,6 +321,7 @@ function openRef(book, from) {
 }
 
 function setMode(next) {
+  log("INFO", "mode", next);
   mode = next;
   document.getElementById("mode-word").setAttribute("aria-pressed", String(next === "word"));
   document.getElementById("mode-meaning").setAttribute("aria-pressed", String(next === "meaning"));
@@ -217,11 +334,38 @@ document.getElementById("mode-meaning").onclick = () => setMode("meaning");
 input.addEventListener("input", e => { if (mode === "word") showWord(e.target.value); });
 input.addEventListener("keydown", e => {
   if (e.key === "Enter" && mode === "meaning") {
-    showMeaning(e.target.value).catch(err => { statusEl.textContent = "שגיאה: " + err.message; });
+    showMeaning(e.target.value).catch(err => {
+      log("ERROR", "meaning search failed", err);
+      statusEl.textContent = "שגיאה: " + err.message;
+    });
   }
 });
 
+// Log panel buttons
+document.getElementById("log-copy").onclick = async () => {
+  const text = (prevLog ? "=== previous session ===\n" + prevLog + "\n=== this session ===\n" : "") + lines.join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    statusEl.textContent = "הלוג הועתק";
+  } catch (e) {
+    const box = document.getElementById("logbox");
+    box.focus(); getSelection().selectAllChildren(box);
+    statusEl.textContent = "סמן את הלוג והעתק ידנית";
+  }
+};
+document.getElementById("log-prev").onclick = () => {
+  document.getElementById("logpanel").open = true;
+  document.getElementById("logbox").textContent = prevLog || "(אין לוג קודם)";
+};
+document.getElementById("log-clear").onclick = () => {
+  lines.length = 0; logSize = 0; prevLog = "";
+  store(PREV_KEY, ""); store(LOG_KEY, "");
+  renderLog();
+};
+document.getElementById("logpanel").addEventListener("toggle", renderLog);
+
 loadData().then(() => setMode("word")).catch(err => {
+  log("ERROR", "data load failed", err);
   statusEl.textContent = "שגיאה בטעינת הנתונים: " + err;
 });
 </script>
