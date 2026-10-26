@@ -33,6 +33,7 @@
   .vline.focus { background:rgba(42,93,176,.14); }
   .en { font:15px/1.5 system-ui,sans-serif; color:var(--muted); direction:ltr; text-align:left; margin-top:2px; }
   body.hide-en .en { display:none; }
+  .similar { font:14px system-ui,sans-serif; direction:ltr; margin-top:4px; padding:3px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); cursor:pointer; }
   #logpanel { margin-top:24px; border-top:2px solid var(--rule); padding-top:8px; font:14px system-ui,sans-serif; }
   #logpanel summary { cursor:pointer; color:var(--accent); font-weight:600; }
   #logpanel .row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
@@ -374,7 +375,7 @@ function render(hits, key) {
     he.className = "he";
     he.innerHTML = verse.he.split(" ").map(tok =>
       key && (key instanceof Set ? key.has(consonants(tok)) : consonants(tok) === key) ? `<mark>${tok}</mark>` : tok).join(" ");
-    box.append(ref, he, en);
+    box.append(ref, he, en, similarButton(i));
     const refs = crossRefs(verse);
     if (refs.length) {
       const x = document.createElement("div");
@@ -433,6 +434,29 @@ function openRef(book, from) {
   if (i === undefined) return;
   input.value = "";
   openChapter(i);
+}
+
+// "~=~": search for verses with a similar meaning, using the verse's English as the query.
+function similarButton(i) {
+  const b = document.createElement("button");
+  b.className = "similar";
+  b.textContent = "~=~";
+  b.title = "Find verses with a similar meaning";
+  b.disabled = !english[data.verses[i].id];
+  b.onclick = () => similarTo(i);
+  return b;
+}
+
+function similarTo(i) {
+  const text = english[data.verses[i].id];
+  if (!text) return;
+  log("INFO", "similar to verse", { verse: data.verses[i].id });
+  setMode("meaning");
+  input.value = text;
+  showMeaning(text).catch(err => {
+    log("ERROR", "similar search failed", err);
+    statusEl.textContent = "Error: " + err.message;
+  });
 }
 
 // ---- Chapter reader ----------------------------------------------------------
@@ -508,7 +532,7 @@ function showChapter() {
     const en = document.createElement("div");
     en.className = "en";
     en.textContent = english[v.id] || "";
-    line.append(num, he, en);
+    line.append(num, he, en, similarButton(i));
     resultsEl.append(line);
   }
   statusEl.textContent = `${heChapter(ch.book, ch.c)} · ${ch.verses.length} verses`;
