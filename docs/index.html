@@ -23,6 +23,14 @@
   .xrefs { font:14px system-ui,sans-serif; color:var(--muted); margin-top:6px; }
   .xrefs button { all:unset; cursor:pointer; color:var(--accent); margin-inline-start:8px; }
   mark { background:transparent; color:var(--accent); font-weight:700; }
+  .ref.link { cursor:pointer; text-decoration:underline; text-underline-offset:3px; }
+  .reader-nav { display:flex; gap:8px; align-items:center; font:15px system-ui,sans-serif; margin:8px 0; flex-wrap:wrap; }
+  .reader-nav button { font:inherit; padding:6px 10px; border-radius:8px; border:1px solid var(--rule); background:var(--chip); color:var(--fg); }
+  .reader-nav button:disabled { opacity:.4; }
+  .reader-nav .title { flex:1; text-align:center; font-weight:600; }
+  .vline { padding:4px 6px; border-radius:6px; }
+  .vline .vnum { font:13px system-ui,sans-serif; color:var(--muted); margin-inline-end:6px; }
+  .vline.focus { background:rgba(42,93,176,.14); }
   #logpanel { margin-top:24px; border-top:2px solid var(--rule); padding-top:8px; font:14px system-ui,sans-serif; }
   #logpanel summary { cursor:pointer; color:var(--accent); font-weight:600; }
   #logpanel .row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
@@ -180,6 +188,7 @@ async function loadData() {
   ]);
   data = t; words = w; xrefs = x;
   searchIndex = buildIndex(t, w, CANON_INDEX);
+  buildChapters();
   byId = new Map(data.verses.map((v, i) => [v.id, i]));
   const half = new Uint16Array(vbuf);
   vectors = new Float32Array(half.length);
@@ -316,15 +325,19 @@ function fmtRef(book, from, to) {
   return `${book} ${a}–${to[0] === from[0] ? to[1] : `${to[0]}:${to[1]}`}`;
 }
 
+let lastRender = null;   // the last result list, to return to from the chapter reader
 function render(hits, key) {
+  lastRender = { hits, key };
   resultsEl.textContent = "";
   for (const [i, score] of hits) {
     const verse = data.verses[i];
     const box = document.createElement("div");
     box.className = "verse";
     const ref = document.createElement("div");
-    ref.className = "ref";
+    ref.className = "ref link";
     ref.textContent = verse.id;
+    ref.title = "פתח את הפרק";
+    ref.onclick = () => openChapter(i);
     if (score !== undefined) {
       const s = document.createElement("span");
       s.className = "score";
@@ -392,8 +405,92 @@ function openRef(book, from) {
   const i = byId.get(`${book} ${from[0]}:${from[1]}`);
   if (i === undefined) return;
   input.value = "";
-  statusEl.textContent = "הפניה";
-  render([[i]], null);
+  openChapter(i);
+}
+
+// ---- Chapter reader ----------------------------------------------------------
+// Chapters in canonical order, so reading moves on from Deuteronomy to Joshua and back.
+let chapters = [], chapterOf = [], readerChapter = -1, readerFocus = -1;
+
+function buildChapters() {
+  const order = data.verses.map((_, i) => i).sort((a, b) => {
+    const x = canonicalKey(a), y = canonicalKey(b);
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+  });
+  chapters = [];
+  chapterOf = new Array(data.verses.length);
+  for (const i of order) {
+    const v = data.verses[i];
+    const last = chapters[chapters.length - 1];
+    if (!last || last.book !== v.book || last.c !== v.c) chapters.push({ book: v.book, c: v.c, verses: [] });
+    chapters[chapters.length - 1].verses.push(i);
+    chapterOf[i] = chapters.length - 1;
+  }
+}
+
+function canonicalKey(i) {
+  const v = data.verses[i];
+  return [CANON_INDEX.get(v.book) ?? 99, v.c, v.v];
+}
+
+function openChapter(i) {
+  readerChapter = chapterOf[i];
+  readerFocus = i;
+  log("INFO", "chapter", { book: data.verses[i].book, c: data.verses[i].c, verse: data.verses[i].v });
+  showChapter();
+}
+
+function showChapter() {
+  const ch = chapters[readerChapter];
+  resultsEl.textContent = "";
+
+  const nav = document.createElement("div");
+  nav.className = "reader-nav";
+  const mk = (label, onclick, disabled = false) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = onclick;
+    b.disabled = disabled;
+    return b;
+  };
+  const title = document.createElement("div");
+  title.className = "title";
+  title.textContent = `${ch.book} ${ch.c}`;
+  nav.append(
+    // Hebrew reads right to left: the previous chapter is on the right, the next on the left.
+    mk("פרק קודם →", () => moveChapter(-1), readerChapter <= 0),
+    title,
+    mk("← פרק הבא", () => moveChapter(1), readerChapter >= chapters.length - 1),
+    mk("חזרה לתוצאות", () => {
+      if (!lastRender) return;
+      render(lastRender.hits, lastRender.key);
+      statusEl.textContent = `${lastRender.hits.length} תוצאות`;
+    }),
+  );
+  resultsEl.append(nav);
+
+  for (const i of ch.verses) {
+    const v = data.verses[i];
+    const line = document.createElement("div");
+    line.className = "vline" + (i === readerFocus ? " focus" : "");
+    const num = document.createElement("span");
+    num.className = "vnum";
+    num.textContent = v.v;
+    const he = document.createElement("span");
+    he.textContent = v.he;
+    line.append(num, he);
+    resultsEl.append(line);
+  }
+  statusEl.textContent = `${ch.book} ${ch.c} · ${ch.verses.length} פסוקים`;
+  const focus = resultsEl.querySelector(".vline.focus");
+  if (focus) focus.scrollIntoView({ block: "center" });
+  else window.scrollTo(0, 0);
+}
+
+function moveChapter(step) {
+  readerChapter += step;
+  readerFocus = -1;
+  showChapter();
 }
 
 function setMode(next) {
