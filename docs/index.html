@@ -31,6 +31,8 @@
   .vline { padding:4px 6px; border-radius:6px; }
   .vline .vnum { font:13px system-ui,sans-serif; color:var(--muted); margin-inline-end:6px; }
   .vline.focus { background:rgba(42,93,176,.14); }
+  .en { font:15px/1.5 system-ui,sans-serif; color:var(--muted); direction:ltr; text-align:left; margin-top:2px; }
+  body.hide-en .en { display:none; }
   #logpanel { margin-top:24px; border-top:2px solid var(--rule); padding-top:8px; font:14px system-ui,sans-serif; }
   #logpanel summary { cursor:pointer; color:var(--accent); font-weight:600; }
   #logpanel .row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
@@ -42,13 +44,14 @@
 </head>
 <body>
 <h1>Concordance: Tanakh</h1>
-<input id="q" type="search" placeholder="חפש מילה או משפט" autocomplete="off" aria-label="Search Hebrew">
+<input id="q" type="search" placeholder="Hebrew word" autocomplete="off" aria-label="Search">
 <div class="modes">
-  <button id="mode-word" aria-pressed="true">מילה</button>
-  <button id="mode-meaning" aria-pressed="false">משמעות (ניסיוני)</button>
+  <button id="mode-word" aria-pressed="true">Word</button>
+  <button id="mode-meaning" aria-pressed="false">Meaning (English, experimental)</button>
 </div>
-<label class="device"><input id="use-gpu" type="checkbox"> GPU (WebGPU) למשמעות, כבוי = CPU</label>
-<div id="status">טוען…</div>
+<label class="device"><input id="use-gpu" type="checkbox"> GPU (WebGPU) for meaning search; off = CPU</label>
+<label class="device"><input id="show-en" type="checkbox" checked> Show the English translation</label>
+<div id="status">Loading…</div>
 <div id="results"></div>
 <div id="crashbanner"></div>
 <details id="logpanel">
@@ -77,13 +80,6 @@ const MODEL_BASE = "https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/
 const DIM = 256;                        // Matryoshka truncation, as in scripts/embed_verses.py
 const DOCUMENT_PREFIX = "title: none | text: ";
 const QUERY_PREFIX = "task: search result | query: ";
-const MARKS = /[֑-ׇ]/g;
-const LETTERS = /[^א-ת ]+/g;
-
-// Same as scripts/embed_verses.py plain() (meaning search).
-function plain(he) {
-  return he.replace(MARKS, "").replace(LETTERS, " ").split(/\s+/).filter(Boolean).join(" ");
-}
 
 // ---- Persistent log -------------------------------------------------------
 // Every line is written to localStorage as it happens, so it survives a tab crash or a
@@ -180,21 +176,27 @@ function halfToFloat(h) {
 async function loadData() {
   const t0 = performance.now();
   log("STAGE", "loading data files");
-  const [t, w, x, vbuf] = await Promise.all([
+  const [t, w, x, en] = await Promise.all([
     fetch("data/tanakh.json").then(r => r.json()),
     fetch("data/words.json").then(r => r.json()),
     fetch("data/xrefs.json").then(r => r.json()),
-    fetch("data/verse_vectors.f16").then(r => r.arrayBuffer()),
+    fetch("data/english.json").then(r => r.json()),
   ]);
-  data = t; words = w; xrefs = x;
+  // The English vectors are optional: without them, word search still works.
+  const vbuf = await fetch("data/english_vectors.f16").then(r => (r.ok ? r.arrayBuffer() : null)).catch(() => null);
+  data = t; words = w; xrefs = x; english = en;
   searchIndex = buildIndex(t, w, CANON_INDEX);
   buildChapters();
   byId = new Map(data.verses.map((v, i) => [v.id, i]));
-  const half = new Uint16Array(vbuf);
-  vectors = new Float32Array(half.length);
-  for (let i = 0; i < half.length; i++) vectors[i] = halfToFloat(half[i]);
-  log("STAGE", "data ready", { verses: data.verses.length, xrefs: xrefs.length, vectorBytes: vbuf.byteLength, ms: Math.round(performance.now() - t0) });
-  statusEl.textContent = `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
+  if (vbuf) {
+    const half = new Uint16Array(vbuf);
+    vectors = new Float32Array(half.length);
+    for (let i = 0; i < half.length; i++) vectors[i] = halfToFloat(half[i]);
+  } else {
+    log("WARN", "English vectors not published; meaning search is off");
+  }
+  log("STAGE", "data ready", { verses: data.verses.length, xrefs: xrefs.length, vectorBytes: vbuf ? vbuf.byteLength : 0, ms: Math.round(performance.now() - t0) });
+  statusEl.textContent = `${data.verses.length} verses · ${xrefs.length} cross-references`;
 }
 
 // Load the text model only, on first use: the CPU (WASM) or GPU (WebGPU) runtime,
@@ -229,7 +231,7 @@ async function weightsBlob() {
     const step = Math.floor((got / total) * 10);
     if (step !== lastStep) {
       lastStep = step;
-      statusEl.textContent = `טוען מודל… ${step * 10}% (אל תסגור את הדף)`;
+      statusEl.textContent = `Loading the model… ${step * 10}% (keep this page open)`;
       log("INFO", "weights download", { percent: step * 10, mb: Math.round(got / 1e6) });
     }
   }
@@ -259,7 +261,7 @@ async function doLoadModel() {
   const blob = await weightsBlob();
   const weightsUrl = URL.createObjectURL(blob);
   log("STAGE", "runtime and weights ready", { provider, ms: Math.round(performance.now() - t0) });
-  statusEl.textContent = "טוען את המודל לזיכרון…";
+  statusEl.textContent = "Loading the model into memory…";
   try {
     extractor = await ort.InferenceSession.create(MODEL_BASE + "model_q4.onnx", {
       externalData: [{ path: "model_q4.onnx_data", data: weightsUrl }],
@@ -280,7 +282,7 @@ async function doLoadModel() {
 async function embedQuery(text) {
   const session = await loadModel();
   const t0 = performance.now();
-  const enc = await tokenizer(QUERY_PREFIX + plain(text));
+  const enc = await tokenizer(QUERY_PREFIX + text.trim().split(/\s+/).join(" "));
   const n = enc.input_ids.dims[enc.input_ids.dims.length - 1];
   const empty = new ort.Tensor("float32", new Float32Array(0), [0, 512]);
   const out = await session.run({
@@ -345,6 +347,7 @@ function heBook(book) { return data.he_titles?.[book] || book; }
 function heChapter(book, c) { return `${heBook(book)} ${geresh(heNum(c))}`; }
 function heRef(book, c, v) { return `${heChapter(book, c)} ${geresh(heNum(v))}`; }
 
+let english = {};                       // verse id -> English translation (JPS 1917)
 let lastRender = null;   // the last result list, to return to from the chapter reader
 function render(hits, key) {
   lastRender = { hits, key };
@@ -356,8 +359,11 @@ function render(hits, key) {
     const ref = document.createElement("div");
     ref.className = "ref link";
     ref.textContent = heRef(verse.book, verse.c, verse.v);
-    ref.title = "פתח את הפרק";
+    ref.title = "Open the chapter";
     ref.onclick = () => openChapter(i);
+    const en = document.createElement("div");
+    en.className = "en";
+    en.textContent = english[verse.id] || "";
     if (score !== undefined) {
       const s = document.createElement("span");
       s.className = "score";
@@ -368,12 +374,12 @@ function render(hits, key) {
     he.className = "he";
     he.innerHTML = verse.he.split(" ").map(tok =>
       key && (key instanceof Set ? key.has(consonants(tok)) : consonants(tok) === key) ? `<mark>${tok}</mark>` : tok).join(" ");
-    box.append(ref, he);
+    box.append(ref, he, en);
     const refs = crossRefs(verse);
     if (refs.length) {
       const x = document.createElement("div");
       x.className = "xrefs";
-      x.append(`הפניות (${refs.length}): `);
+      x.append(`Cross-references (${refs.length}): `);
       for (const [b, f, t] of refs.slice(0, 12)) {
         const btn = document.createElement("button");
         btn.textContent = fmtRef(b, f, t);
@@ -402,22 +408,23 @@ function showWord(query) {
   const ranked = rankWords(query, searchIndex);
   log("INFO", "word search", { query, words: keys.length, hits: ranked.length });
   statusEl.textContent = ranked.length
-    ? `${ranked.length} מופעים (מוצגים עד 200, לפי רלוונטיות)` : "לא נמצא";
+    ? `${ranked.length} matches (showing up to 200, by relevance)` : "Not found";
   render(ranked.slice(0, 200).map(([i]) => [i]), new Set(keys));
 }
 
 async function showMeaning(query) {
   const text = query.trim();
   if (!text) { resultsEl.textContent = ""; return; }
+  if (!vectors) { statusEl.textContent = "Meaning search is not available yet"; return; }
   lastQuery = text;
   log("INFO", "meaning search", { query: text });
-  if (!extractor) statusEl.textContent = "טוען מודל…";
+  if (!extractor) statusEl.textContent = "Loading the model…";
   const q = await embedQuery(text);
   if (lastQuery !== text) return;   // a newer query has replaced this one
   const t0 = performance.now();
   const hits = topK(q, 10);
   log("INFO", "ranked", { ms: Math.round(performance.now() - t0), top: hits.slice(0, 3).map(([i, s]) => data.verses[i].id + " " + s.toFixed(3)) });
-  statusEl.textContent = "10 התאמות הקרובות ביותר";
+  statusEl.textContent = "10 closest matches";
   render(hits, null);
 }
 
@@ -478,13 +485,13 @@ function showChapter() {
   title.textContent = heChapter(ch.book, ch.c);
   nav.append(
     // Hebrew reads right to left: the previous chapter is on the right, the next on the left.
-    mk("פרק קודם →", () => moveChapter(-1), readerChapter <= 0),
+    mk("Previous chapter →", () => moveChapter(-1), readerChapter <= 0),
     title,
-    mk("← פרק הבא", () => moveChapter(1), readerChapter >= chapters.length - 1),
-    mk("חזרה לתוצאות", () => {
+    mk("← Next chapter", () => moveChapter(1), readerChapter >= chapters.length - 1),
+    mk("Back to results", () => {
       if (!lastRender) return;
       render(lastRender.hits, lastRender.key);
-      statusEl.textContent = `${lastRender.hits.length} תוצאות`;
+      statusEl.textContent = `${lastRender.hits.length} results`;
     }),
   );
   resultsEl.append(nav);
@@ -498,10 +505,13 @@ function showChapter() {
     num.textContent = geresh(heNum(v.v));
     const he = document.createElement("span");
     he.textContent = v.he;
-    line.append(num, he);
+    const en = document.createElement("div");
+    en.className = "en";
+    en.textContent = english[v.id] || "";
+    line.append(num, he, en);
     resultsEl.append(line);
   }
-  statusEl.textContent = `${heChapter(ch.book, ch.c)} · ${ch.verses.length} פסוקים`;
+  statusEl.textContent = `${heChapter(ch.book, ch.c)} · ${ch.verses.length} verses`;
   const focus = resultsEl.querySelector(".vline.focus");
   if (focus) focus.scrollIntoView({ block: "center" });
   else window.scrollTo(0, 0);
@@ -515,11 +525,12 @@ function moveChapter(step) {
 
 function setMode(next) {
   log("INFO", "mode", next);
+  input.placeholder = next === "meaning" ? "English phrase, e.g. God created the world" : "Hebrew word";
   mode = next;
   document.getElementById("mode-word").setAttribute("aria-pressed", String(next === "word"));
   document.getElementById("mode-meaning").setAttribute("aria-pressed", String(next === "meaning"));
   resultsEl.textContent = "";
-  statusEl.textContent = next === "meaning" ? "הקלד משפט ולחץ Enter" : `${data.verses.length} פסוקים`;
+  statusEl.textContent = next === "meaning" ? "Type an English phrase and press Enter" : `${data.verses.length} verses`;
 }
 
 document.getElementById("mode-word").onclick = () => setMode("word");
@@ -529,7 +540,7 @@ input.addEventListener("keydown", e => {
   if (e.key === "Enter" && mode === "meaning") {
     showMeaning(e.target.value).catch(err => {
       log("ERROR", "meaning search failed", err);
-      statusEl.textContent = "שגיאה: " + err.message;
+      statusEl.textContent = "Error: " + err.message;
     });
   }
 });
@@ -543,21 +554,30 @@ gpuBox.addEventListener("change", () => {
   location.reload();
 });
 
+// English translation checkbox: shown by default, saved per browser.
+const showEn = document.getElementById("show-en");
+try { showEn.checked = localStorage.getItem("concordance-en") !== "0"; } catch (e) { /* private mode */ }
+document.body.classList.toggle("hide-en", !showEn.checked);
+showEn.addEventListener("change", () => {
+  document.body.classList.toggle("hide-en", !showEn.checked);
+  try { localStorage.setItem("concordance-en", showEn.checked ? "1" : "0"); } catch (e) { /* private mode */ }
+});
+
 // Log panel buttons
 document.getElementById("log-copy").onclick = async () => {
   const text = (prevLog ? "=== previous session ===\n" + prevLog + "\n=== this session ===\n" : "") + lines.join("\n");
   try {
     await navigator.clipboard.writeText(text);
-    statusEl.textContent = "הלוג הועתק";
+    statusEl.textContent = "Log copied";
   } catch (e) {
     const box = document.getElementById("logbox");
     box.focus(); getSelection().selectAllChildren(box);
-    statusEl.textContent = "סמן את הלוג והעתק ידנית";
+    statusEl.textContent = "Select the log and copy it by hand";
   }
 };
 document.getElementById("log-prev").onclick = () => {
   document.getElementById("logpanel").open = true;
-  document.getElementById("logbox").textContent = prevLog || "(אין לוג קודם)";
+  document.getElementById("logbox").textContent = prevLog || "(no earlier log)";
 };
 document.getElementById("log-clear").onclick = () => {
   lines.length = 0; logSize = 0; prevLog = "";
@@ -568,7 +588,7 @@ document.getElementById("logpanel").addEventListener("toggle", renderLog);
 
 loadData().then(() => setMode("word")).catch(err => {
   log("ERROR", "data load failed", err);
-  statusEl.textContent = "שגיאה בטעינת הנתונים: " + err;
+  statusEl.textContent = "Error loading the data: " + err;
 });
 </script>
 </body>
