@@ -40,8 +40,10 @@ def consonants(word):
 def flatten(verse):
     if isinstance(verse, list):
         return " ".join(flatten(v) for v in verse)
-    # Tags and entities such as &thinsp; mark breaks between words, so they become spaces.
-    text = html.unescape(TAGS.sub(" ", verse)).replace("\u05BE", " ")  # maqaf joins words
+    # Formatting tags (<big>, <b>) wrap parts of a word, so they join; a break (&thinsp;, <br>)
+    # separates words. The maqaf joins two words and becomes a space.
+    text = TAGS.sub(lambda m: " " if m.group(0).lower().startswith("<br") else "", verse)
+    text = html.unescape(text).replace("\u00a0", " ").replace("\u2009", " ").replace("\u05BE", " ")
     return " ".join(text.split())
 
 

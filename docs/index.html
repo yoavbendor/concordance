@@ -54,6 +54,7 @@
 </details>
 <script type="module">
 "use strict";
+import { buildIndex, rankWords, queryKeys, consonants } from "./search.js";
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
 
 const MODEL = "onnx-community/embeddinggemma-2-ONNX";
@@ -68,15 +69,9 @@ const MODEL_BASE = "https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/
 const DIM = 256;                        // Matryoshka truncation, as in scripts/embed_verses.py
 const DOCUMENT_PREFIX = "title: none | text: ";
 const QUERY_PREFIX = "task: search result | query: ";
-const FINAL = { "ך":"כ", "ם":"מ", "ן":"נ", "ף":"פ", "ץ":"צ" };
 const MARKS = /[֑-ׇ]/g;
 const LETTERS = /[^א-ת ]+/g;
 
-// Same normalization as scripts/build_tanakh.py consonants() (word search).
-function consonants(word) {
-  return word.normalize("NFC").replace(MARKS, "")
-    .replace(/[^א-ת]/g, "").replace(/[ךםןףץ]/g, c => FINAL[c]);
-}
 // Same as scripts/embed_verses.py plain() (meaning search).
 function plain(he) {
   return he.replace(MARKS, "").replace(LETTERS, " ").split(/\s+/).filter(Boolean).join(" ");
@@ -184,6 +179,7 @@ async function loadData() {
     fetch("data/verse_vectors.f16").then(r => r.arrayBuffer()),
   ]);
   data = t; words = w; xrefs = x;
+  searchIndex = buildIndex(t, w, CANON_INDEX);
   byId = new Map(data.verses.map((v, i) => [v.id, i]));
   const half = new Uint16Array(vbuf);
   vectors = new Float32Array(half.length);
@@ -357,56 +353,24 @@ function render(hits, key) {
   }
 }
 
-// Canonical order of the Tanakh, so results read Genesis first. The data's book list is alphabetical.
+// Canonical order of the Tanakh, Genesis first (the data's book list is alphabetical).
 const CANON = ["Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua", "Judges",
   "I Samuel", "II Samuel", "I Kings", "II Kings", "Isaiah", "Jeremiah", "Ezekiel", "Hosea", "Joel",
   "Amos", "Obadiah", "Jonah", "Micah", "Nahum", "Habakkuk", "Zephaniah", "Haggai", "Zechariah",
   "Malachi", "Psalms", "Proverbs", "Job", "Song of Songs", "Ruth", "Lamentations", "Ecclesiastes",
   "Esther", "Daniel", "Ezra", "Nehemiah", "I Chronicles", "II Chronicles"];
 const CANON_INDEX = new Map(CANON.map((b, i) => [b, i]));
-function canonicalKey(i) {
-  const v = data.verses[i];
-  return [CANON_INDEX.get(v.book) ?? 99, v.c, v.v];
-}
-function inCanonicalOrder(indices) {
-  return indices.sort((x, y) => {
-    const a = canonicalKey(x), b = canonicalKey(y);
-    return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
-  });
-}
+let searchIndex = null;
 
-// Hebrew one-letter prefixes (and, the, in, to, like, from, that...) that often attach to a word.
-const PREFIXES = ["ו", "ה", "ב", "ל", "כ", "מ", "ש"];
-
-// Exact word forms first; when they are few, also the forms with a prefix removed,
-// so that וַיֹּאמֶר or לָאָרֶץ still find אמר and ארץ. Duplicates are dropped.
-function wordHits(query) {
-  const key = consonants(query.trim());
-  if (!key) return { key, keys: [], hits: [] };
-  const keys = [key];
-  const exact = words[key] || [];
-  if (exact.length < 5) {
-    for (const p of PREFIXES) if (key.startsWith(p) && key.length > 2 && words[key.slice(1)]) keys.push(key.slice(1));
-  }
-  // Still nothing: the Tanakh often spells a word without a vav (אלהים for אלוהים).
-  if (!keys.some(k => words[k])) {
-    for (let j = 1; j < key.length - 1; j++) {
-      if (key[j] === "ו" && words[key.slice(0, j) + key.slice(j + 1)]) keys.push(key.slice(0, j) + key.slice(j + 1));
-    }
-  }
-  const seen = new Set(), hits = [];
-  for (const k of keys) for (const i of words[k] || []) {
-    if (!seen.has(i)) { seen.add(i); hits.push(i); }
-  }
-  return { key, keys, hits: inCanonicalOrder(hits).slice(0, 200).map(i => [i]) };
-}
-
+// Word search: every word of the query, ranked by relevance (see docs/search.js).
 function showWord(query) {
-  const { key, keys, hits } = wordHits(query);
-  if (!key) { resultsEl.textContent = ""; return; }
-  log("INFO", "word search", { query, keys, hits: hits.length });
-  statusEl.textContent = hits.length ? `${hits.length} מופעים (מוצגים עד 200)` : "לא נמצא";
-  render(hits, new Set(keys));
+  const keys = queryKeys(query);
+  if (keys.length === 0) { resultsEl.textContent = ""; return; }
+  const ranked = rankWords(query, searchIndex);
+  log("INFO", "word search", { query, words: keys.length, hits: ranked.length });
+  statusEl.textContent = ranked.length
+    ? `${ranked.length} מופעים (מוצגים עד 200, לפי רלוונטיות)` : "לא נמצא";
+  render(ranked.slice(0, 200).map(([i]) => [i]), new Set(keys));
 }
 
 async function showMeaning(query) {
