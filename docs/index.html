@@ -320,10 +320,30 @@ function crossRefs(verse) {
 }
 
 function fmtRef(book, from, to) {
-  const a = `${from[0]}:${from[1]}`;
-  if (from[0] === to[0] && from[1] === to[1]) return `${book} ${a}`;
-  return `${book} ${a}–${to[0] === from[0] ? to[1] : `${to[0]}:${to[1]}`}`;
+  const start = heRef(book, from[0], from[1]);
+  if (from[0] === to[0] && from[1] === to[1]) return start;
+  const end = to[0] === from[0] ? geresh(heNum(to[1])) : heRef(book, to[0], to[1]).replace(heBook(book) + " ", "");
+  return `${start}–${end}`;
 }
+
+// Hebrew labels: book titles from the data, and numbers written as letters (gematria).
+const HE_DIGITS = ["", "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט"];
+const HE_TENS = ["", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"];
+const HE_HUNDREDS = ["", "ק", "ר", "ש", "ת"];
+function heNum(n) {
+  let s = "";
+  let rest = n;
+  while (rest >= 400) { s += "ת"; rest -= 400; }
+  if (rest >= 100) { s += HE_HUNDREDS[Math.floor(rest / 100)]; rest %= 100; }
+  if (rest === 15) return s + "טו";      // not יה, which spells a divine name
+  if (rest === 16) return s + "טז";
+  return s + HE_TENS[Math.floor(rest / 10)] + HE_DIGITS[rest % 10];
+}
+// Geresh after a single letter (א׳), gershayim before the last letter of more (י״א).
+const geresh = s => (s.length === 1 ? s + "׳" : s.slice(0, -1) + "״" + s.slice(-1));
+function heBook(book) { return data.he_titles?.[book] || book; }
+function heChapter(book, c) { return `${heBook(book)} ${geresh(heNum(c))}`; }
+function heRef(book, c, v) { return `${heChapter(book, c)} ${geresh(heNum(v))}`; }
 
 let lastRender = null;   // the last result list, to return to from the chapter reader
 function render(hits, key) {
@@ -335,7 +355,7 @@ function render(hits, key) {
     box.className = "verse";
     const ref = document.createElement("div");
     ref.className = "ref link";
-    ref.textContent = verse.id;
+    ref.textContent = heRef(verse.book, verse.c, verse.v);
     ref.title = "פתח את הפרק";
     ref.onclick = () => openChapter(i);
     if (score !== undefined) {
@@ -455,7 +475,7 @@ function showChapter() {
   };
   const title = document.createElement("div");
   title.className = "title";
-  title.textContent = `${ch.book} ${ch.c}`;
+  title.textContent = heChapter(ch.book, ch.c);
   nav.append(
     // Hebrew reads right to left: the previous chapter is on the right, the next on the left.
     mk("פרק קודם →", () => moveChapter(-1), readerChapter <= 0),
@@ -475,13 +495,13 @@ function showChapter() {
     line.className = "vline" + (i === readerFocus ? " focus" : "");
     const num = document.createElement("span");
     num.className = "vnum";
-    num.textContent = v.v;
+    num.textContent = geresh(heNum(v.v));
     const he = document.createElement("span");
     he.textContent = v.he;
     line.append(num, he);
     resultsEl.append(line);
   }
-  statusEl.textContent = `${ch.book} ${ch.c} · ${ch.verses.length} פסוקים`;
+  statusEl.textContent = `${heChapter(ch.book, ch.c)} · ${ch.verses.length} פסוקים`;
   const focus = resultsEl.querySelector(".vline.focus");
   if (focus) focus.scrollIntoView({ block: "center" });
   else window.scrollTo(0, 0);
