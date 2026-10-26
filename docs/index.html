@@ -51,9 +51,13 @@
 </details>
 <script type="module">
 "use strict";
-import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
+import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.mjs";
 
 const MODEL = "onnx-community/embeddinggemma-2-ONNX";
+// Only the text model is loaded. The repo's vision and audio encoders (about 300 MB more)
+// are never used for search, and loading them crashed the page on iPhone.
+const MODEL_BASE = "https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/main/onnx/";
 const DIM = 256;                        // Matryoshka truncation, as in scripts/embed_verses.py
 const DOCUMENT_PREFIX = "title: none | text: ";
 const QUERY_PREFIX = "task: search result | query: ";
@@ -75,7 +79,7 @@ function plain(he) {
 // Every line is written to localStorage as it happens, so it survives a tab crash or a
 // reload. A run that never reached pagehide is marked as having crashed on the next load.
 const LOG_KEY = "concordance-log", PREV_KEY = "concordance-log-prev", RUN_KEY = "concordance-running";
-const LOG_MAX = 300000;          // characters kept per session
+const LOG_MAX = 200000;          // characters kept per session
 const lines = [];
 let logSize = 0, persistTimer = null, prevLog = "", prevCrashed = false;
 
@@ -101,7 +105,7 @@ function log(level, msg, detail) {
   while (logSize > LOG_MAX && lines.length > 1) logSize -= lines.shift().length + 1;
   // Errors and stage markers are written at once; the rest are batched to keep the page fast.
   if (level === "ERROR" || level === "STAGE") { if (persistTimer) clearTimeout(persistTimer); persistNow(); }
-  else if (!persistTimer) persistTimer = setTimeout(persistNow, 400);
+  else if (!persistTimer) persistTimer = setTimeout(persistNow, 1500);
   if (document.getElementById("logpanel")?.open) renderLog();
 }
 
@@ -181,43 +185,49 @@ async function loadData() {
   statusEl.textContent = `${data.verses.length} פסוקים · ${xrefs.length} הפניות`;
 }
 
-// Load the query model on first use; WebGPU when the browser has it, WASM otherwise.
+// Load the text model only, on first use. WebGPU when the browser has it, WASM otherwise.
+let tokenizer = null;
 async function loadModel() {
   if (extractor) return extractor;
   env.allowLocalModels = false;
   const t0 = performance.now();
-  let lastStep = -1;
-  const progress = p => {
-    if (p.status === "progress" && p.total) {
-      statusEl.textContent = `טוען מודל… ${Math.round(p.progress)}%`;
-      const step = Math.floor(p.progress / 10);    // log every 10%, not every chunk
-      if (step !== lastStep) { lastStep = step; log("INFO", "model download", { file: p.file, percent: Math.round(p.progress) }); }
-    } else if (p.status !== "progress") {
-      log("INFO", "model " + p.status, p.file || "");
-    }
+  log("STAGE", "loading text model", { model: "model_q4.onnx", webgpu: "gpu" in navigator });
+  if (!tokenizer) tokenizer = await AutoTokenizer.from_pretrained(MODEL);
+  log("STAGE", "tokenizer ready", { ms: Math.round(performance.now() - t0) });
+  const options = {
+    // The weights are one 174 MB file next to the graph; ORT fetches the data file itself.
+    externalData: [{ path: "model_q4.onnx_data", data: MODEL_BASE + "model_q4.onnx_data" }],
   };
-  const opts = { dtype: "q4", progress_callback: progress };
-  log("STAGE", "loading model", { model: MODEL, dtype: "q4", webgpu: "gpu" in navigator });
-  try {
-    extractor = await pipeline("feature-extraction", MODEL, { ...opts, device: "webgpu" });
-    log("STAGE", "model ready on webgpu", { ms: Math.round(performance.now() - t0) });
-  } catch (e) {
-    log("ERROR", "webgpu failed, falling back to wasm", e);
-    extractor = await pipeline("feature-extraction", MODEL, { ...opts, device: "wasm" });
-    log("STAGE", "model ready on wasm", { ms: Math.round(performance.now() - t0) });
+  for (const ep of ["webgpu", "wasm"]) {
+    try {
+      extractor = await ort.InferenceSession.create(MODEL_BASE + "model_q4.onnx",
+        { ...options, executionProviders: [ep] });
+      log("STAGE", "text model ready", { provider: ep, ms: Math.round(performance.now() - t0) });
+      return extractor;
+    } catch (e) {
+      log("ERROR", `session on ${ep} failed`, e);
+    }
   }
-  return extractor;
+  throw new Error("the text model could not start on WebGPU or WASM");
 }
 
-// Query vector: prompt, mean pooling, truncate to DIM, renormalize (matches embed_verses.py).
+// Query vector: prompt, mean-pooled sentence embedding, truncate to DIM, renormalize
+// (the same vectors as scripts/embed_verses.py, up to the q4 weights).
 async function embedQuery(text) {
-  const model = await loadModel();
+  const session = await loadModel();
   const t0 = performance.now();
-  const out = await model(QUERY_PREFIX + plain(text), { pooling: "mean", normalize: true });
-  const v = Float32Array.from(out.data.slice(0, DIM));
-  const n = Math.hypot(...v);
-  log("INFO", "query embedded", { chars: text.length, ms: Math.round(performance.now() - t0) });
-  return v.map(x => x / n);
+  const enc = await tokenizer(QUERY_PREFIX + plain(text));
+  const n = enc.input_ids.dims[enc.input_ids.dims.length - 1];
+  const empty = new ort.Tensor("float32", new Float32Array(0), [0, 512]);
+  const out = await session.run({
+    input_ids: new ort.Tensor("int64", enc.input_ids.data, [1, n]),
+    attention_mask: new ort.Tensor("int64", enc.attention_mask.data, [1, n]),
+    image_features: empty, video_features: empty, audio_features: empty,
+  });
+  const v = Float32Array.from(out.sentence_embedding.data.slice(0, DIM));
+  const norm = Math.hypot(...v);
+  log("INFO", "query embedded", { tokens: n, ms: Math.round(performance.now() - t0) });
+  return v.map(x => x / norm);
 }
 
 function topK(q, k) {
