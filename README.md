@@ -1,7 +1,7 @@
 # Concordance
 
-Hebrew text of the Torah, searchable in the browser, with cross-references.
-Offline use is planned; this first step is the Torah only.
+Hebrew text of the Tanakh, searchable in the browser, with cross-references.
+Offline use is planned. Torah, Prophets and Writings are in; commentary is not.
 
 ## Data
 
@@ -12,13 +12,13 @@ book. Check the license of any text before publishing a derived copy.
 
 ## Build
 
-    python3 scripts/build_torah.py
+    python3 scripts/build_tanakh.py
 
 This writes three files into `docs/data/`:
 
-- `torah.json`: every verse, with its nikud and the book's Hebrew title.
+- `tanakh.json`: every verse, with its nikud and the book's Hebrew title.
 - `words.json`: search key (consonants, final letters folded) to verse indices.
-- `xrefs.json`: Torah-to-Torah cross-reference spans, as
+- `xrefs.json`: Tanakh cross-reference spans, as
   `[from_chapter_verse, book, to_chapter_verse, from2, book2, to2]`.
 
 Standard library only. The build downloads the export; nothing is cached.
@@ -33,8 +33,8 @@ then open http://localhost:8000.
 
 ## Status
 
-- Torah only (5 books, 5,846 verses).
-- Cross-references kept when both ends fall in the Torah. Whole-chapter
+- Tanakh: Torah, Prophets and Writings (39 books).
+- Cross-references kept when both ends fall in the Tanakh. Whole-chapter
   references such as `Genesis 1` are not parsed yet.
-- Not yet: the Tanakh, commentary, a Lance store, an offline service worker,
+- Not yet: commentary, a Lance store, an offline service worker,
   and a semantic index.

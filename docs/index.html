@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Concordance: Torah</title>
+<title>Concordance: Tanakh</title>
 <style>
   :root { color-scheme: light dark; --fg:#1b1b1b; --bg:#fbfaf7; --muted:#6b6b6b; --accent:#2a5db0; --rule:#d9d6cf; }
   @media (prefers-color-scheme: dark) { :root { --fg:#e8e6e1; --bg:#16161a; --muted:#9a9a9a; --accent:#7aa7ff; --rule:#34343b; } }
@@ -20,7 +20,7 @@
 </style>
 </head>
 <body>
-<h1>Concordance: Torah</h1>
+<h1>Concordance: Tanakh</h1>
 <input id="q" type="search" placeholder="חפש מילה" autocomplete="off" aria-label="Search Hebrew word">
 <div id="status">טוען…</div>
 <div id="results"></div>
@@ -39,7 +39,7 @@ let data = null, words = null, xrefs = null, byId = null;
 
 async function load() {
   const [t, w, x] = await Promise.all([
-    fetch("data/torah.json").then(r => r.json()),
+    fetch("data/tanakh.json").then(r => r.json()),
     fetch("data/words.json").then(r => r.json()),
     fetch("data/xrefs.json").then(r => r.json()),
   ]);

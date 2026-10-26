@@ -1,7 +1,7 @@
-"""Build the browser data for the Hebrew Torah from the Sefaria export.
+"""Build the browser data for the Hebrew Tanakh (Torah, Prophets, Writings) from the Sefaria export.
 
-Writes docs/data/torah.json (verses), docs/data/words.json (word -> verse ids)
-and docs/data/xrefs.json (cross-reference span pairs between Torah passages).
+Writes docs/data/tanakh.json (verses), docs/data/words.json (word -> verse ids)
+and docs/data/xrefs.json (cross-reference span pairs between Tanakh passages).
 Standard library only. Source: https://github.com/Sefaria/Sefaria-Export
 """
 import csv
@@ -17,6 +17,7 @@ EXPORT = "https://storage.googleapis.com/sefaria-export"
 BOOKS_JSON = "https://raw.githubusercontent.com/Sefaria/Sefaria-Export/master/books.json"
 LINK_FILES = 13
 OUT = Path(__file__).resolve().parent.parent / "docs" / "data"
+SECTIONS = {"Torah", "Prophets", "Writings"}
 
 NIKUD_AND_MARKS = re.compile(r"[֑-ׇ]")  # cantillation, points, meteg
 TAGS = re.compile(r"<[^>]+>")
@@ -41,20 +42,22 @@ def flatten(verse):
     return TAGS.sub("", verse).strip()
 
 
-def load_torah_books():
+def load_tanakh_books():
     books = json.loads(get(BOOKS_JSON))["books"]
-    torah = [
+    tanakh = [
         b for b in books
         if b.get("language") == "Hebrew"
         and b.get("versionTitle") == "merged"
-        and b.get("categories", [None, None])[:2] == ["Tanakh", "Torah"]
+        and b.get("categories", [None, None])[:1] == ["Tanakh"]
+        and len(b.get("categories", [])) > 1
+        and b["categories"][1] in SECTIONS
     ]
-    return sorted(torah, key=lambda b: b["title"])
+    return sorted(tanakh, key=lambda b: b["title"])
 
 
-def build_verses(torah_books):
+def build_verses(tanakh_books):
     verses, names = [], {}
-    for book in torah_books:
+    for book in tanakh_books:
         data = json.loads(get(book["json_url"]))
         names[book["title"]] = data.get("heTitle", "")
         for c, chapter in enumerate(data["text"], start=1):
@@ -91,7 +94,7 @@ def parse_span(ref, books):
 
 
 def build_xrefs(books):
-    """Stream the link CSVs and keep rows where both ends are Torah spans."""
+    """Stream the link CSVs and keep rows where both ends are Tanakh spans."""
     edges = []
     for n in range(LINK_FILES):
         url = f"{EXPORT}/links/links{n}.csv"
@@ -104,17 +107,17 @@ def build_xrefs(books):
                 b = parse_span(row["Citation 2"], books)
                 if a and b:
                     edges.append([list(a[1]), a[0], list(a[2]), list(b[1]), b[0], list(b[2])])
-        print(f"links{n}.csv: {len(edges)} Torah edges so far")
+        print(f"links{n}.csv: {len(edges)} Tanakh edges so far")
     return edges
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    torah_books = load_torah_books()
-    names = {b["title"] for b in torah_books}
+    tanakh_books = load_tanakh_books()
+    names = {b["title"] for b in tanakh_books}
     print("books:", ", ".join(sorted(names)))
 
-    verses, he_titles = build_verses(torah_books)
+    verses, he_titles = build_verses(tanakh_books)
     words = defaultdict(set)
     for i, verse in enumerate(verses):
         for token in verse["he"].split():
@@ -124,7 +127,7 @@ def main():
 
     xrefs = build_xrefs(names)
 
-    (OUT / "torah.json").write_text(json.dumps(
+    (OUT / "tanakh.json").write_text(json.dumps(
         {"books": sorted(names), "he_titles": he_titles, "verses": verses},
         ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     (OUT / "words.json").write_text(json.dumps(
