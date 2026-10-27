@@ -43,6 +43,9 @@
   .sheet .com h3 { font:600 14px system-ui,sans-serif; color:var(--accent); margin:0 0 4px; }
   .sheet .com p { margin:0 0 6px; }
   .sheet .xref { display:inline-block; margin:2px 6px 2px 0; padding:4px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); font:15px system-ui,sans-serif; cursor:pointer; }
+  .w.hit { color:var(--accent); font-weight:700; }
+  .w { -webkit-touch-callout:none; }
+  .sheet .occ { display:inline-block; margin:2px 6px 2px 0; padding:3px 9px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); font:14px system-ui,sans-serif; cursor:pointer; }
   .sheet .none { color:var(--muted); font:15px system-ui,sans-serif; }
   body.sheet-open { padding-bottom:64vh; }
   .comments { font:14px system-ui,sans-serif; direction:ltr; margin-top:4px; padding:3px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); cursor:pointer; }
@@ -393,8 +396,7 @@ function render(hits, key) {
     }
     const he = document.createElement("div");
     he.className = "he";
-    he.innerHTML = verse.he.split(" ").map(tok =>
-      key && (key instanceof Set ? key.has(consonants(tok)) : consonants(tok) === key) ? `<mark>${tok}</mark>` : tok).join(" ");
+    he.append(wordNodes(verse.he, key));
     box.append(ref, he, en, similarButton(i), commentsButton(i));
     attachLongPress(he, i);
     const refs = crossRefs(verse);
@@ -477,6 +479,78 @@ function similarTo(i) {
   log("INFO", "similar to verse", { verse: data.verses[i].id });
   statusEl.textContent = `Verses similar to ${heRef(data.verses[i].book, data.verses[i].c, data.verses[i].v)}`;
   render(hits, null);
+}
+
+// The Hebrew of a verse as one span per word; the words in `marked` (a key or a set of keys) are highlighted.
+function wordNodes(he, marked) {
+  const keys = marked instanceof Set ? marked : (marked ? new Set([marked]) : null);
+  const frag = document.createDocumentFragment();
+  he.split(" ").forEach((tok, k) => {
+    if (k > 0) frag.append(" ");
+    const s = document.createElement("span");
+    s.className = "w";
+    s.dataset.k = k;
+    s.textContent = tok;
+    if (keys && keys.has(consonants(tok))) s.classList.add("hit");
+    frag.append(s);
+  });
+  return frag;
+}
+
+// ---- Word sheet ----------------------------------------------------------------
+// A long press on one word: its appearances in this verse's commentary, and where else the
+// word occurs in the Tanakh (tap to open that passage).
+async function openWordSheet(i, k) {
+  const v = data.verses[i];
+  const tok = v.he.split(" ")[k];
+  const key = consonants(tok);
+  const sheet = document.getElementById("sheet");
+  document.getElementById("sheet-title").textContent = `${tok} · ${heRef(v.book, v.c, v.v)}`;
+  const body = document.getElementById("sheet-body");
+  body.textContent = "טוען…";
+  sheet.hidden = false;
+  document.body.classList.add("sheet-open");
+  log("INFO", "word", { verse: v.id, word: tok, key });
+
+  const all = await commentaryFor(v.book);
+  const comments = (all[v.id] || []).filter(c => c.t.split(" ").some(t => consonants(t) === key));
+  body.textContent = "";
+
+  const h1 = document.createElement("h3");
+  h1.textContent = "בפירוש לפסוק זה";
+  body.append(h1);
+  if (comments.length === 0) {
+    const none = document.createElement("div");
+    none.className = "none";
+    none.textContent = "המילה לא מופיעה בפירושי הפסוק.";
+    body.append(none);
+  }
+  for (const c of comments) {
+    const p = document.createElement("p");
+    p.style.direction = "rtl";
+    p.append(`${COMMENTATOR_HE[c.c] || c.c}: `);
+    c.t.split(" ").forEach((t, n) => {
+      if (n > 0) p.append(" ");
+      if (consonants(t) === key) {
+        const m = document.createElement("strong");
+        m.textContent = t;
+        p.append(m);
+      } else p.append(t);
+    });
+    body.append(p);
+  }
+
+  const occurrences = (words[key] || []).filter(x => x !== i);
+  const h2 = document.createElement("h3");
+  h2.textContent = `מופעים במקרא (${occurrences.length})`;
+  body.append(h2);
+  for (const x of occurrences.slice(0, 80)) {
+    const b = document.createElement("button");
+    b.className = "occ";
+    b.textContent = heRef(data.verses[x].book, data.verses[x].c, data.verses[x].v);
+    b.onclick = () => { closeSheet(); openChapter(x); };
+    body.append(b);
+  }
 }
 
 // ---- Commentary sheet -------------------------------------------------------
@@ -565,7 +639,11 @@ function commentsButton(i) {
 function attachLongPress(el, i) {
   let timer = null;
   const cancel = () => { clearTimeout(timer); timer = null; };
-  el.addEventListener("pointerdown", () => { timer = setTimeout(() => { timer = null; openSheet(i); }, 500); });
+  el.addEventListener("pointerdown", e => {
+    const word = e.target.closest?.(".w");
+    const k = word ? Number(word.dataset.k) : -1;
+    timer = setTimeout(() => { timer = null; if (k >= 0) openWordSheet(i, k); else openSheet(i); }, 500);
+  });
   el.addEventListener("pointerup", cancel);
   el.addEventListener("pointerleave", cancel);
   el.addEventListener("pointercancel", cancel);
@@ -688,7 +766,7 @@ function chapterSection(ci) {
     num.className = "vnum";
     num.textContent = geresh(heNum(v.v));
     const he = document.createElement("span");
-    he.textContent = v.he;
+    he.append(wordNodes(v.he, null));
     const en = document.createElement("div");
     en.className = "en";
     en.textContent = english[v.id] || "";
