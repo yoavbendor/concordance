@@ -83,6 +83,17 @@ jina-reranker-v1-tiny-en (int8) raises recall@10 to 0.23 and 0.44 and MRR@10 to 
 (first 150 queries of each length). The page reranks the top 30, which keeps most of the
 gain (recall@10 0.21 and 0.41) at less cost on a phone.
 
+## Hierarchical meaning search (tested, not adopted)
+
+    python3 scripts/build_windows.py
+    python3 scripts/eval_windows.py --model-dir <dir>
+
+Windows of 5 verses, 11 verses and whole chapters were embedded from the English and
+scored on the English test set. Verse vectors alone (10 words: recall@10 0.32, MRR 0.19)
+beat every window level (best window alone 0.07 and 0.05 recall@10) and every mix with
+verse scores (best 0.28 recall@10 at weight 0.5). The verse-level search with the
+reranker stays the search; the windows are kept only for later experiments.
+
 ## Run
 
 Serve `docs/` with any static server, for example:
