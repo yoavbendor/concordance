@@ -86,3 +86,14 @@ then open http://localhost:8000.
   references such as `Genesis 1` are not parsed yet.
 - Not yet: commentary, a Lance store, an offline service worker,
   and a semantic index.
+
+## Later
+
+- **Hierarchical meaning search.** Embed windows of several verses (about 5, 11, and whole
+  chapters) as well as single verses, using the English translation. A passage-level
+  match would find a meaning that runs across verses, and would tolerate verse numbering
+  that differs between the Hebrew and an English translation. The verse-level index stays
+  for precise hits. Judge it on the evaluation set first: the Divrei David comments often
+  span several verses, so the test should show whether the windows help before we keep them.
+- **Reading and commentary.** A long press on a word opens its materials in a sheet;
+  verse-level commentary first, from the Lance tables.
