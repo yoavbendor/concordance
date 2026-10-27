@@ -31,6 +31,7 @@
   .vline { padding:4px 6px; border-radius:6px; }
   .vline .vnum { font:13px system-ui,sans-serif; color:var(--muted); margin-inline-end:6px; }
   .vline.focus { background:rgba(42,93,176,.14); }
+  .chapter-title { font:600 18px system-ui,sans-serif; margin:18px 0 6px; padding-top:8px; border-top:2px solid var(--rule); }
   .en { font:15px/1.5 system-ui,sans-serif; color:var(--muted); direction:ltr; text-align:left; margin-top:2px; }
   body.hide-en .en { display:none; }
   .sheet { position:fixed; left:0; right:0; bottom:0; max-height:62vh; overflow:auto; background:var(--bg); border-top:2px solid var(--rule); box-shadow:0 -6px 24px rgba(0,0,0,.18); padding:10px 16px 28px; z-index:10; border-radius:14px 14px 0 0; }
@@ -574,7 +575,7 @@ function attachLongPress(el, i) {
 
 // ---- Chapter reader ----------------------------------------------------------
 // Chapters in canonical order, so reading moves on from Deuteronomy to Joshua and back.
-let chapters = [], chapterOf = [], readerChapter = -1, readerFocus = -1;
+let chapters = [], chapterOf = [], readerFocus = -1;
 
 function buildChapters() {
   const order = data.verses.map((_, i) => i).sort((a, b) => {
@@ -597,42 +598,88 @@ function canonicalKey(i) {
   return [CANON_INDEX.get(v.book) ?? 99, v.c, v.v];
 }
 
+// Continuous reading: the chapter opened, with the chapters before and after it loading as
+// the reader scrolls. At most MAX_SECTIONS chapters stay in the page; far ones are dropped.
+const MAX_SECTIONS = 10;
+let readerEl = null, topSentinel = null, bottomSentinel = null, observer = null;
+let sections = new Map();                 // chapter index -> section element
+let minLoaded = -1, maxLoaded = -1;
+
 function openChapter(i) {
-  readerChapter = chapterOf[i];
+  log("INFO", "reader", { book: data.verses[i].book, c: data.verses[i].c, verse: data.verses[i].v });
   readerFocus = i;
-  log("INFO", "chapter", { book: data.verses[i].book, c: data.verses[i].c, verse: data.verses[i].v });
-  showChapter();
-}
-
-function showChapter() {
-  const ch = chapters[readerChapter];
   resultsEl.textContent = "";
-
-  const nav = document.createElement("div");
-  nav.className = "reader-nav";
-  const mk = (label, onclick, disabled = false) => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.onclick = onclick;
-    b.disabled = disabled;
-    return b;
-  };
+  const bar = document.createElement("div");
+  bar.className = "reader-nav";
   const title = document.createElement("div");
   title.className = "title";
-  title.textContent = heChapter(ch.book, ch.c);
-  nav.append(
-    // Hebrew reads right to left: the previous chapter is on the right, the next on the left.
-    mk("Previous chapter →", () => moveChapter(-1), readerChapter <= 0),
-    title,
-    mk("← Next chapter", () => moveChapter(1), readerChapter >= chapters.length - 1),
-    mk("Back to results", () => {
-      if (!lastRender) return;
-      render(lastRender.hits, lastRender.key);
-      statusEl.textContent = `${lastRender.hits.length} results`;
-    }),
-  );
-  resultsEl.append(nav);
+  title.id = "reader-title";
+  const back = document.createElement("button");
+  back.textContent = "Back to results";
+  back.onclick = () => {
+    stopReader();
+    if (lastRender) render(lastRender.hits, lastRender.key);
+    statusEl.textContent = lastRender ? `${lastRender.hits.length} results` : "";
+  };
+  bar.append(title, back);
+  resultsEl.append(bar);
 
+  readerEl = document.createElement("div");
+  readerEl.id = "reader";
+  topSentinel = document.createElement("div");
+  bottomSentinel = document.createElement("div");
+  readerEl.append(topSentinel, bottomSentinel);
+  resultsEl.append(readerEl);
+
+  sections = new Map();
+  const ci = chapterOf[i];
+  minLoaded = maxLoaded = ci;
+  insertSection(ci, "after-top");
+  observer = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      if (e.target === bottomSentinel) loadNext();
+      else if (e.target === topSentinel) loadPrev();
+    }
+  }, { rootMargin: "600px 0px" });
+  observer.observe(topSentinel);
+  observer.observe(bottomSentinel);
+  window.addEventListener("scroll", updateReaderTitle, { passive: true });
+  statusEl.textContent = "";
+  const focus = sections.get(ci).querySelector(".vline.focus");
+  if (focus) focus.scrollIntoView({ block: "center" });
+  updateReaderTitle();
+}
+
+function stopReader() {
+  if (observer) observer.disconnect();
+  observer = null;
+  readerEl = null;
+  window.removeEventListener("scroll", updateReaderTitle);
+}
+
+// The chapter at the top of the screen names the sticky bar.
+function updateReaderTitle() {
+  if (!readerEl) return;
+  const bar = document.getElementById("reader-title");
+  let current = minLoaded;
+  for (let ci = minLoaded; ci <= maxLoaded; ci++) {
+    const el = sections.get(ci);
+    if (el && el.getBoundingClientRect().bottom > 90) { current = ci; break; }
+  }
+  const ch = chapters[current];
+  bar.textContent = heChapter(ch.book, ch.c);
+}
+
+function chapterSection(ci) {
+  const ch = chapters[ci];
+  const sec = document.createElement("section");
+  sec.className = "chapter";
+  sec.dataset.ci = ci;
+  const h = document.createElement("h2");
+  h.className = "chapter-title";
+  h.textContent = heChapter(ch.book, ch.c);
+  sec.append(h);
   for (const i of ch.verses) {
     const v = data.verses[i];
     const line = document.createElement("div");
@@ -647,18 +694,52 @@ function showChapter() {
     en.textContent = english[v.id] || "";
     line.append(num, he, en, similarButton(i), commentsButton(i));
     attachLongPress(he, i);
-    resultsEl.append(line);
+    sec.append(line);
   }
-  statusEl.textContent = `${heChapter(ch.book, ch.c)} · ${ch.verses.length} verses`;
-  const focus = resultsEl.querySelector(".vline.focus");
-  if (focus) focus.scrollIntoView({ block: "center" });
-  else window.scrollTo(0, 0);
+  return sec;
 }
 
-function moveChapter(step) {
-  readerChapter += step;
-  readerFocus = -1;
-  showChapter();
+function insertSection(ci, where) {
+  const sec = chapterSection(ci);
+  sections.set(ci, sec);
+  if (where === "after-top") readerEl.insertBefore(sec, bottomSentinel);
+  return sec;
+}
+
+function loadNext() {
+  if (!readerEl || maxLoaded >= chapters.length - 1) return;
+  maxLoaded++;
+  insertSection(maxLoaded, "after-top");
+  trim(true);
+}
+
+function loadPrev() {
+  if (!readerEl || minLoaded <= 0) return;
+  minLoaded--;
+  const before = document.documentElement.scrollHeight;
+  const sec = chapterSection(minLoaded);
+  sections.set(minLoaded, sec);
+  readerEl.insertBefore(sec, topSentinel.nextSibling);
+  // Keep the text the reader is looking at in place when content is added above it.
+  window.scrollBy(0, document.documentElement.scrollHeight - before);
+  trim(false);
+}
+
+// Drop the chapters farthest from the reader, from the side it did not come from.
+function trim(fromTop) {
+  while (sections.size > MAX_SECTIONS) {
+    const before = document.documentElement.scrollHeight;
+    if (fromTop) {
+      sections.get(minLoaded).remove();
+      sections.delete(minLoaded);
+      minLoaded++;
+      window.scrollBy(0, document.documentElement.scrollHeight - before);
+    } else {
+      sections.get(maxLoaded).remove();
+      sections.delete(maxLoaded);
+      maxLoaded--;
+    }
+  }
 }
 
 function setMode(next) {
