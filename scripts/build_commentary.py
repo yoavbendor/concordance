@@ -65,6 +65,10 @@ def main():
     for book, verses in shards.items():
         (shard_dir / f"{book}.json").write_text(json.dumps(verses, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     print("shards:", len(shards))
+    # The verses that have any commentary, so the page can mark the empty ones without loading files.
+    with_comments = sorted({r[0] for r in rows})
+    (shard_dir / "index.json").write_text(json.dumps(with_comments, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print("verses with commentary:", len(with_comments))
 
     import lance
     import pyarrow as pa

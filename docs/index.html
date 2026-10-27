@@ -44,6 +44,7 @@
   .sheet .none { color:var(--muted); font:15px system-ui,sans-serif; }
   body.sheet-open { padding-bottom:64vh; }
   .comments { font:14px system-ui,sans-serif; direction:ltr; margin-top:4px; padding:3px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); cursor:pointer; }
+  .comments.empty { color:var(--muted); opacity:.55; }
   .similar { font:14px system-ui,sans-serif; direction:ltr; margin-top:4px; padding:3px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); cursor:pointer; }
   #logpanel { margin-top:24px; border-top:2px solid var(--rule); padding-top:8px; font:14px system-ui,sans-serif; }
   #logpanel summary { cursor:pointer; color:var(--accent); font-weight:600; }
@@ -199,6 +200,7 @@ async function loadData() {
     fetch("data/xrefs.json").then(r => r.json()),
     fetch("data/english.json").then(r => r.json()),
   ]);
+  withCommentary = new Set(await fetch("data/commentary/index.json").then(r => (r.ok ? r.json() : [])).catch(() => []));
   // The English vectors are optional: without them, word search still works.
   const vbuf = await fetch("data/english_vectors.f16").then(r => (r.ok ? r.arrayBuffer() : null)).catch(() => null);
   data = t; words = w; xrefs = x; english = en;
@@ -480,6 +482,7 @@ function similarTo(i) {
 // loaded the first time it is needed; the sheet closes with ✕ and the text stays in view.
 const COMMENTATOR_HE = { "Rashi": "רש״י", "Ramban": "רמב״ן", "Ibn Ezra": "אבן עזרא", "Sforno": "ספורנו" };
 const commentaryCache = new Map();
+let withCommentary = new Set();      // verse ids that have any commentary (commentary/index.json)
 function commentaryFor(book) {
   if (!commentaryCache.has(book)) {
     commentaryCache.set(book, fetch(`data/commentary/${encodeURIComponent(book)}.json`)
@@ -530,9 +533,10 @@ document.getElementById("sheet-close").onclick = closeSheet;
 // Opens the sheet for a verse: from its 💬 button, or a long press (about half a second) on its Hebrew.
 function commentsButton(i) {
   const b = document.createElement("button");
-  b.className = "comments";
+  const empty = !withCommentary.has(data.verses[i].id);
+  b.className = "comments" + (empty ? " empty" : "");   // grey when there is nothing to open
   b.textContent = "💬";
-  b.title = "Commentaries";
+  b.title = empty ? "No commentary for this verse" : "Commentaries";
   b.onclick = () => openSheet(i);
   return b;
 }
