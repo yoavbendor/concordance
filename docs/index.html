@@ -41,6 +41,7 @@
   .sheet .com { border-top:1px solid var(--rule); padding:8px 0; }
   .sheet .com h3 { font:600 14px system-ui,sans-serif; color:var(--accent); margin:0 0 4px; }
   .sheet .com p { margin:0 0 6px; }
+  .sheet .xref { display:inline-block; margin:2px 6px 2px 0; padding:4px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); font:15px system-ui,sans-serif; cursor:pointer; }
   .sheet .none { color:var(--muted); font:15px system-ui,sans-serif; }
   body.sheet-open { padding-bottom:64vh; }
   .comments { font:14px system-ui,sans-serif; direction:ltr; margin-top:4px; padding:3px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); cursor:pointer; }
@@ -504,6 +505,7 @@ async function openSheet(i) {
   const all = await commentaryFor(v.book);
   const comments = all[v.id] || [];
   body.textContent = "";
+  appendCrossRefs(body, i);
   if (comments.length === 0) {
     const none = document.createElement("div");
     none.className = "none";
@@ -522,6 +524,25 @@ async function openSheet(i) {
     block.append(h, p);
     body.append(block);
   }
+}
+
+// Cross-references of the verse, as buttons: a tap closes the sheet and opens that passage.
+function appendCrossRefs(body, i) {
+  const refs = crossRefs(data.verses[i]);
+  if (refs.length === 0) return;
+  const block = document.createElement("div");
+  block.className = "com";
+  const h = document.createElement("h3");
+  h.textContent = `הפניות (${refs.length})`;
+  block.append(h);
+  for (const [b, f, t] of refs) {
+    const btn = document.createElement("button");
+    btn.className = "xref";
+    btn.textContent = fmtRef(b, f, t);
+    btn.onclick = () => { closeSheet(); openRef(b, f); };
+    block.append(btn);
+  }
+  body.append(block);
 }
 
 function closeSheet() {
