@@ -47,7 +47,7 @@ def plain(he):
     return " ".join(LETTERS_ONLY.sub(" ", MARKS.sub("", he)).split())
 
 
-def embed(texts):
+def embed(texts, ctx=512):
     """Return an (n, 768) float32 array, one row per text, in order."""
     assert not any(SEP in t for t in texts)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as f:
@@ -56,7 +56,7 @@ def embed(texts):
     try:
         out = subprocess.run(
             [str(LLAMA_CPP_BIN), "-m", str(GGUF), "-f", path, "--embd-separator", SEP,
-             "-c", "512", "--embd-output-format", "json"],
+             "-c", str(ctx), "--embd-output-format", "json"],
             capture_output=True, text=True, check=True).stdout
     finally:
         os.unlink(path)
