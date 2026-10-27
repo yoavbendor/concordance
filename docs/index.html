@@ -436,6 +436,62 @@ function showWord(query) {
   render(ranked.slice(0, 200).map(([i]) => [i]), new Set(keys));
 }
 
+// ---- Reranker ----------------------------------------------------------------
+// After the first results show, the top 30 are rescored by a small cross-encoder (query and
+// verse read together) and reordered. jina-reranker-v1-tiny-en, int8, about 33 MB, cached.
+const RERANK_MODEL = "jinaai/jina-reranker-v1-tiny-en";
+const RERANK_URL = "https://huggingface.co/jinaai/jina-reranker-v1-tiny-en/resolve/main/onnx/model_int8.onnx";
+const RERANK_CACHE = "concordance-reranker-v1";
+const RERANK_TOP = 30;
+let reranker = null, rerankTok = null, rerankLoading = null;
+
+async function cachedBytes(url, cacheName) {
+  let cache = null;
+  try { cache = await caches.open(cacheName); } catch (e) { /* no cache storage */ }
+  const hit = cache ? await cache.match(url) : null;
+  if (hit) return new Uint8Array(await hit.arrayBuffer());
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (cache) { try { await cache.put(url, new Response(bytes)); } catch (e) { /* quota */ } }
+  return bytes;
+}
+
+function loadReranker() {
+  if (reranker) return Promise.resolve(reranker);
+  if (!rerankLoading) {
+    rerankLoading = (async () => {
+      const t0 = performance.now();
+      log("STAGE", "loading reranker", { model: RERANK_MODEL });
+      statusEl.textContent = "Loading the reranker…";
+      rerankTok = await AutoTokenizer.from_pretrained(RERANK_MODEL);
+      const bytes = await cachedBytes(RERANK_URL, RERANK_CACHE);
+      reranker = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] });
+      log("STAGE", "reranker ready", { ms: Math.round(performance.now() - t0) });
+      return reranker;
+    })().catch(e => { rerankLoading = null; throw e; });
+  }
+  return rerankLoading;
+}
+
+// Rescore candidate verses for a query: [verse index, score in 0..1], best first.
+async function rerank(query, candidates) {
+  const session = await loadReranker();
+  const enc = await rerankTok(candidates.map(() => query), {
+    text_pair: candidates.map(i => english[data.verses[i].id] || ""),
+    padding: true, truncation: true, max_length: 512,
+  });
+  const n = candidates.length, L = enc.input_ids.dims[1];
+  const out = await session.run({
+    input_ids: new ort.Tensor("int64", enc.input_ids.data, [n, L]),
+    attention_mask: new ort.Tensor("int64", enc.attention_mask.data, [n, L]),
+  });
+  const logits = out.logits.data;
+  return candidates
+    .map((i, k) => [i, 1 / (1 + Math.exp(-logits[k]))])
+    .sort((a, b) => b[1] - a[1]);
+}
+
 async function showMeaning(query) {
   const text = query.trim();
   if (!text) { resultsEl.textContent = ""; return; }
@@ -446,10 +502,24 @@ async function showMeaning(query) {
   const q = await embedQuery(text);
   if (lastQuery !== text) return;   // a newer query has replaced this one
   const t0 = performance.now();
-  const hits = topK(q, 10);
-  log("INFO", "ranked", { ms: Math.round(performance.now() - t0), top: hits.slice(0, 3).map(([i, s]) => data.verses[i].id + " " + s.toFixed(3)) });
+  const first = topK(q, RERANK_TOP);
+  log("INFO", "ranked", { ms: Math.round(performance.now() - t0), top: first.slice(0, 3).map(([i, s]) => data.verses[i].id + " " + s.toFixed(3)) });
   statusEl.textContent = "10 closest matches";
-  render(hits, null);
+  render(first.slice(0, 10), null);
+
+  // Refine the order of the top 30 with the reranker; the list updates in place when it is ready.
+  try {
+    const t1 = performance.now();
+    statusEl.textContent = "Refining the order…";
+    const ranked = await rerank(text, first.map(([i]) => i));
+    if (lastQuery !== text) return;
+    log("INFO", "reranked", { ms: Math.round(performance.now() - t1), top: ranked.slice(0, 3).map(([i, s]) => data.verses[i].id + " " + s.toFixed(3)) });
+    render(ranked.slice(0, 10), null);
+    statusEl.textContent = "10 best matches (reranked from 30)";
+  } catch (err) {
+    log("ERROR", "reranker failed; showing the first-stage order", err);
+    statusEl.textContent = "10 closest matches";
+  }
 }
 
 function openRef(book, from) {

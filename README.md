@@ -71,6 +71,18 @@ On the 88 and 71 pairs whose query shares no word with the target verse, the sem
 score finds none of the targets. Caveat: commentary quotes the verse it explains, so this
 set favours word matching; it measures vocabulary more than meaning.
 
+## English meaning search and the reranker
+
+    python3 scripts/build_eval_en.py                 # English Rashi, Ramban, Ibn Ezra as queries
+    python3 scripts/eval_english.py --model-dir <dir>
+    python3 scripts/eval_rerank.py --model-dir <dir> --rerank-dir <dir with jina's model_int8.onnx and tokenizer.json>
+
+On 1,080 English queries (540 per length), the first stage gives recall@10 0.13 (4 words)
+and 0.32 (10 words), with recall@50 at 0.25 and 0.47. Reranking the top 50 with
+jina-reranker-v1-tiny-en (int8) raises recall@10 to 0.23 and 0.44 and MRR@10 to 0.14 and 0.35
+(first 150 queries of each length). The page reranks the top 30, which keeps most of the
+gain (recall@10 0.21 and 0.41) at less cost on a phone.
+
 ## Run
 
 Serve `docs/` with any static server, for example:
