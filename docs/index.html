@@ -465,8 +465,10 @@ function loadReranker() {
       log("STAGE", "loading reranker", { model: RERANK_MODEL });
       statusEl.textContent = "Loading the reranker…";
       rerankTok = await AutoTokenizer.from_pretrained(RERANK_MODEL);
+      // The runtime is loaded here too when the reranker is the first thing used (a similar-verse search).
+      if (!ort) ort = await import(USE_GPU ? ORT_GPU : ORT_CPU);
       const bytes = await cachedBytes(RERANK_URL, RERANK_CACHE);
-      reranker = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] });
+      reranker = await ort.InferenceSession.create(bytes, { executionProviders: [USE_GPU ? "webgpu" : "wasm"] });
       log("STAGE", "reranker ready", { ms: Math.round(performance.now() - t0) });
       return reranker;
     })().catch(e => { rerankLoading = null; throw e; });
@@ -540,15 +542,26 @@ function similarButton(i) {
   return b;
 }
 
-function similarTo(i) {
+async function similarTo(i) {
   if (!vectors) { statusEl.textContent = "Meaning search is not available yet"; return; }
   // The verse's own English vector is already computed: rank the others against it, no model.
   const q = vectors.slice(i * DIM, (i + 1) * DIM);
-  const hits = topK(q, 10);
-  lastQuery = "";                       // a pending typed search must not replace these results
+  const first = topK(q, RERANK_TOP).filter(([j]) => j !== i);   // the verse itself is not a match
+  lastQuery = `~${i}`;                  // a typed search that starts later replaces these results
   log("INFO", "similar to verse", { verse: data.verses[i].id });
   statusEl.textContent = `Verses similar to ${heRef(data.verses[i].book, data.verses[i].c, data.verses[i].v)}`;
-  render(hits, null);
+  render(first.slice(0, 10), null);
+  // Refine the order with the reranker, the verse's English as the query.
+  const query = english[data.verses[i].id];
+  if (!query) return;
+  try {
+    const ranked = (await rerank(query, first.map(([j]) => j))).filter(([j]) => j !== i);
+    if (lastQuery !== `~${i}`) return;   // another search has replaced these results
+    render(ranked.slice(0, 10), null);
+    statusEl.textContent = `Verses similar to ${heRef(data.verses[i].book, data.verses[i].c, data.verses[i].v)} (reranked)`;
+  } catch (err) {
+    log("ERROR", "reranker failed for similar verses", err);
+  }
 }
 
 // The Hebrew of a verse as one span per word; the words in `marked` (a key or a set of keys) are highlighted.
