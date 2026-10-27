@@ -33,6 +33,17 @@
   .vline.focus { background:rgba(42,93,176,.14); }
   .en { font:15px/1.5 system-ui,sans-serif; color:var(--muted); direction:ltr; text-align:left; margin-top:2px; }
   body.hide-en .en { display:none; }
+  .sheet { position:fixed; left:0; right:0; bottom:0; max-height:62vh; overflow:auto; background:var(--bg); border-top:2px solid var(--rule); box-shadow:0 -6px 24px rgba(0,0,0,.18); padding:10px 16px 28px; z-index:10; border-radius:14px 14px 0 0; }
+  .sheet[hidden] { display:none; }
+  .sheet .grip { width:40px; height:5px; border-radius:3px; background:var(--rule); margin:0 auto 8px; }
+  .sheet .head { display:flex; align-items:center; justify-content:space-between; gap:8px; font:600 16px system-ui,sans-serif; margin-bottom:6px; }
+  .sheet .head button { font:18px system-ui,sans-serif; border:none; background:none; color:var(--fg); padding:4px 8px; cursor:pointer; }
+  .sheet .com { border-top:1px solid var(--rule); padding:8px 0; }
+  .sheet .com h3 { font:600 14px system-ui,sans-serif; color:var(--accent); margin:0 0 4px; }
+  .sheet .com p { margin:0 0 6px; }
+  .sheet .none { color:var(--muted); font:15px system-ui,sans-serif; }
+  body.sheet-open { padding-bottom:64vh; }
+  .comments { font:14px system-ui,sans-serif; direction:ltr; margin-top:4px; padding:3px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); cursor:pointer; }
   .similar { font:14px system-ui,sans-serif; direction:ltr; margin-top:4px; padding:3px 10px; border-radius:999px; border:1px solid var(--rule); background:var(--chip); color:var(--accent); cursor:pointer; }
   #logpanel { margin-top:24px; border-top:2px solid var(--rule); padding-top:8px; font:14px system-ui,sans-serif; }
   #logpanel summary { cursor:pointer; color:var(--accent); font-weight:600; }
@@ -53,6 +64,11 @@
 <label class="device"><input id="use-gpu" type="checkbox"> GPU (WebGPU) for meaning search; off = CPU</label>
 <label class="device"><input id="show-en" type="checkbox" checked> Show the English translation</label>
 <div id="status">Loading…</div>
+<div id="sheet" class="sheet" hidden role="dialog" aria-label="Commentary">
+  <div class="grip"></div>
+  <div class="head"><span id="sheet-title"></span><button id="sheet-close" aria-label="Close">✕</button></div>
+  <div id="sheet-body"></div>
+</div>
 <div id="results"></div>
 <div id="crashbanner"></div>
 <details id="logpanel">
@@ -375,7 +391,8 @@ function render(hits, key) {
     he.className = "he";
     he.innerHTML = verse.he.split(" ").map(tok =>
       key && (key instanceof Set ? key.has(consonants(tok)) : consonants(tok) === key) ? `<mark>${tok}</mark>` : tok).join(" ");
-    box.append(ref, he, en, similarButton(i));
+    box.append(ref, he, en, similarButton(i), commentsButton(i));
+    attachLongPress(he, i);
     const refs = crossRefs(verse);
     if (refs.length) {
       const x = document.createElement("div");
@@ -458,6 +475,78 @@ function similarTo(i) {
   render(hits, null);
 }
 
+// ---- Commentary sheet -------------------------------------------------------
+// The verse's commentaries (Rashi, Ramban, Ibn Ezra, Sforno), in Hebrew. A book's file is
+// loaded the first time it is needed; the sheet closes with ✕ and the text stays in view.
+const COMMENTATOR_HE = { "Rashi": "רש״י", "Ramban": "רמב״ן", "Ibn Ezra": "אבן עזרא", "Sforno": "ספורנו" };
+const commentaryCache = new Map();
+function commentaryFor(book) {
+  if (!commentaryCache.has(book)) {
+    commentaryCache.set(book, fetch(`data/commentary/${encodeURIComponent(book)}.json`)
+      .then(r => (r.ok ? r.json() : {}))
+      .catch(() => ({})));
+  }
+  return commentaryCache.get(book);
+}
+
+async function openSheet(i) {
+  const v = data.verses[i];
+  const sheet = document.getElementById("sheet");
+  document.getElementById("sheet-title").textContent = heRef(v.book, v.c, v.v);
+  const body = document.getElementById("sheet-body");
+  body.textContent = "טוען…";
+  sheet.hidden = false;
+  document.body.classList.add("sheet-open");
+  log("INFO", "commentary", { verse: v.id });
+  const all = await commentaryFor(v.book);
+  const comments = all[v.id] || [];
+  body.textContent = "";
+  if (comments.length === 0) {
+    const none = document.createElement("div");
+    none.className = "none";
+    none.textContent = "אין פירוש לפסוק זה במאגר.";
+    body.append(none);
+    return;
+  }
+  for (const c of comments) {
+    const block = document.createElement("div");
+    block.className = "com";
+    const h = document.createElement("h3");
+    h.textContent = COMMENTATOR_HE[c.c] || c.c;
+    const p = document.createElement("p");
+    p.textContent = c.t;
+    p.style.direction = "rtl";
+    block.append(h, p);
+    body.append(block);
+  }
+}
+
+function closeSheet() {
+  document.getElementById("sheet").hidden = true;
+  document.body.classList.remove("sheet-open");
+}
+document.getElementById("sheet-close").onclick = closeSheet;
+
+// Opens the sheet for a verse: from its 💬 button, or a long press (about half a second) on its Hebrew.
+function commentsButton(i) {
+  const b = document.createElement("button");
+  b.className = "comments";
+  b.textContent = "💬";
+  b.title = "Commentaries";
+  b.onclick = () => openSheet(i);
+  return b;
+}
+function attachLongPress(el, i) {
+  let timer = null;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  el.addEventListener("pointerdown", () => { timer = setTimeout(() => { timer = null; openSheet(i); }, 500); });
+  el.addEventListener("pointerup", cancel);
+  el.addEventListener("pointerleave", cancel);
+  el.addEventListener("pointercancel", cancel);
+  el.addEventListener("pointermove", cancel);
+  el.addEventListener("contextmenu", e => e.preventDefault());
+}
+
 // ---- Chapter reader ----------------------------------------------------------
 // Chapters in canonical order, so reading moves on from Deuteronomy to Joshua and back.
 let chapters = [], chapterOf = [], readerChapter = -1, readerFocus = -1;
@@ -531,7 +620,8 @@ function showChapter() {
     const en = document.createElement("div");
     en.className = "en";
     en.textContent = english[v.id] || "";
-    line.append(num, he, en, similarButton(i));
+    line.append(num, he, en, similarButton(i), commentsButton(i));
+    attachLongPress(he, i);
     resultsEl.append(line);
   }
   statusEl.textContent = `${heChapter(ch.book, ch.c)} · ${ch.verses.length} verses`;
