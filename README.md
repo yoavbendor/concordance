@@ -94,6 +94,63 @@ beat every window level (best window alone 0.07 and 0.05 recall@10) and every mi
 verse scores (best 0.28 recall@10 at weight 0.5). The verse-level search with the
 reranker stays the search; the windows are kept only for later experiments.
 
+## Rebuild from scratch
+
+What is in git: the page (`docs/`), the scripts, the tests, and the small generated page data.
+What is not: the Lance tables (`data/lance/`), the evaluation pairs (`data/eval/`), the
+downloaded models and the llama.cpp build. This is how to make them again, in order. Run
+everything from the repository root.
+
+Requirements: Python 3 with `pip install pylance pyarrow numpy onnxruntime tokenizers`;
+Node.js with Playwright only for the browser tests; cmake and a C++ compiler for llama.cpp.
+
+1. **Tanakh text, cross-references and word index** (downloads the Sefaria export):
+
+       python3 scripts/build_tanakh.py          # docs/data/tanakh.json, words.json, xrefs.json
+       python3 scripts/write_lance.py           # data/lance/verses, words, xrefs (+ indexes)
+
+2. **English translation** (JPS 1917, all 39 books): `python3 scripts/build_english.py`
+   writes `docs/data/english.json`.
+
+3. **Embedding model.** The text model is `model_q4.onnx` and `model_q4.onnx_data` from
+   `onnx-community/embeddinggemma-2-ONNX`; the page downloads it itself. The Lance
+   embeddings use the GGUF file of `embeddinggemma-2` from Ollama's registry (the text
+   blob), and a llama.cpp build that knows the `gemma-embedding2` architecture:
+
+       git clone --depth 1 https://github.com/ggml-org/llama.cpp
+       cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release
+       cmake --build llama.cpp/build --target llama-embedding -j4
+       export LLAMA_EMBEDDING=$PWD/llama.cpp/build/bin/llama-embedding
+       export EMBEDDINGGEMMA_GGUF=<path to the embeddinggemma-2 text GGUF>
+
+4. **English vectors for the page** (about 15 minutes on 4 cores):
+   `python3 scripts/embed_english.py` writes `docs/data/english_vectors.f16` and
+   `data/lance/english_vectors.lance`.
+
+5. **Commentary** (Rashi, Ramban, Ibn Ezra, Sforno): `python3 scripts/build_commentary.py`
+   writes `docs/data/commentary/` (per book, and `index.json`) and `data/lance/commentary.lance`.
+
+6. **Optional.** Hebrew verse vectors (`python3 scripts/embed_verses.py`, then
+   `python3 scripts/export_vectors.py`) feed `data/lance/verse_vectors.lance`; the page no
+   longer uses the Hebrew vectors. Windows (`python3 scripts/build_windows.py`) feed the
+   experiment in the section above.
+
+7. **Evaluation data.** The link files for the Hebrew test set come from the export bucket:
+
+       mkdir -p data/links && for n in $(seq 0 12); do \
+         curl -sS -o data/links/links$n.csv https://storage.googleapis.com/sefaria-export/links/links$n.csv; done
+       curl -sS -o data/links/books.json https://raw.githubusercontent.com/Sefaria/Sefaria-Export/master/books.json
+       python3 scripts/build_eval.py --links-dir data/links      # Hebrew pairs
+       python3 scripts/build_eval_en.py                          # English pairs
+
+   The evaluation scripts need the model files of step 3 and the reranker
+   (`jinaai/jina-reranker-v1-tiny-en`, `onnx/model_int8.onnx` and `tokenizer.json`, from Hugging
+   Face), passed with `--model-dir` and `--rerank-dir`.
+
+8. **Run the page**: `python3 -m http.server -d docs 8000`, then open http://localhost:8000.
+
+9. **Browser tests**: see `tests/browser/README.md`.
+
 ## Run
 
 Serve `docs/` with any static server, for example:
