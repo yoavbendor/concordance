@@ -1,0 +1,24 @@
+const { chromium } = require('playwright');
+(async () => {
+  const b = await chromium.launch();
+  const p = await b.newPage();
+  const errs = []; p.on('pageerror', e => errs.push(String(e)));
+  await p.goto('' + (process.env.BASE_URL || 'http://localhost:8794/') + 'index.html');
+  await p.waitForFunction(() => document.getElementById('status').textContent.includes('פסוקים'), null, { timeout: 120000 });
+  await p.fill('#q', 'בראשית'); await p.waitForTimeout(300);
+  await p.click('.verse .ref');
+  console.log('opened:', await p.textContent('#status'), '| focus verse:', await p.textContent('.vline.focus .vnum'), '| lines:', await p.$$eval('.vline', e => e.length));
+  console.log('prev disabled at Genesis 1:', await p.isDisabled('text=פרק קודם →'));
+  await p.click('text=← פרק הבא');
+  console.log('next:', await p.textContent('#status'));
+  for (let i = 0; i < 48; i++) await p.click('text=← פרק הבא');
+  console.log('at Genesis 50:', await p.textContent('#status'));
+  await p.click('text=← פרק הבא');
+  console.log('across into:', await p.textContent('#status'));
+  await p.click('text=פרק קודם →');
+  console.log('back across:', await p.textContent('#status'));
+  await p.click('text=חזרה לתוצאות');
+  console.log('results again:', await p.textContent('#status'));
+  console.log('errors:', errs);
+  await b.close();
+})().catch(e => { console.error('FAILED', e.message); process.exit(1); });
